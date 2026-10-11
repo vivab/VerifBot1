@@ -70,3 +70,12 @@ def cancel_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="❌ Отмена", callback_data="cancel")
     return builder.as_markup()
+
+
+def invoice_keyboard(invoice_id: int) -> InlineKeyboardMarkup:
+    """Кнопка проверки оплаты после создания счёта."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Я оплатил — проверить", callback_data=f"check_pay:{invoice_id}")
+    builder.button(text="◀️ Назад", callback_data="back_main")
+    builder.adjust(1)
+    return builder.as_markup()

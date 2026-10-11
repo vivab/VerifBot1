@@ -7,7 +7,8 @@ from bot.database.db import db
 from bot.database.models import UserRole, EntryType, OrderStatus
 from bot.keyboards.user_kb import (
     catalog_keyboard, back_keyboard, confirm_buy_keyboard,
-    profile_keyboard, topup_amounts_keyboard, cancel_keyboard, main_menu
+    profile_keyboard, topup_amounts_keyboard, cancel_keyboard, main_menu,
+    invoice_keyboard
 )
 from bot.keyboards.seller_kb import new_order_keyboard
 from bot.states.states import TopUpStates, BuyStates, WithdrawStates
@@ -72,7 +73,6 @@ async def confirm_buy(callback: CallbackQuery, state: FSMContext):
 
     user = await db.get_user(callback.from_user.id)
 
-    # Проверяем баланс
     if user.balance < product.buyer_price:
         await callback.answer(
             f"Недостаточно средств. Нужно {product.buyer_price}$, у вас {user.balance:.2f}$",
@@ -80,11 +80,9 @@ async def confirm_buy(callback: CallbackQuery, state: FSMContext):
         )
         return
 
-    # Списываем сразу
     await db.update_balance(user.user_id, -product.buyer_price)
     await db.add_turnover(user.user_id, product.buyer_price)
 
-    # Просим данные входа
     await state.set_state(BuyStates.waiting_entry_data)
     await state.update_data(product_id=product_id)
 
@@ -126,7 +124,6 @@ async def process_entry_data(message: Message, state: FSMContext, bot: Bot):
     else:
         entry_data = {"phone": lines[0], "code": lines[1]}
 
-    # Создаём заказ
     order_id = await db.create_order(
         buyer_id=message.from_user.id,
         product=product,
@@ -142,7 +139,6 @@ async def process_entry_data(message: Message, state: FSMContext, bot: Bot):
         reply_markup=main_menu((await db.get_user(message.from_user.id)).role)
     )
 
-    # Уведомляем всех продавцов
     sellers = await db.get_users_by_role(UserRole.SELLER)
     admins = await db.get_users_by_role(UserRole.ADMIN)
     owners = await db.get_users_by_role(UserRole.OWNER)
@@ -242,7 +238,6 @@ async def withdraw_amount(message: Message, state: FSMContext):
         await message.answer(f"Недостаточно средств. Баланс: {user.balance:.2f}$")
         return
 
-    # Списываем
     await db.update_balance(user.user_id, -amount)
 
     try:
@@ -255,7 +250,6 @@ async def withdraw_amount(message: Message, state: FSMContext):
             reply_markup=main_menu(user.role)
         )
     except Exception as e:
-        # Возвращаем деньги при ошибке
         await db.update_balance(user.user_id, amount)
         await message.answer(f"❌ Ошибка создания чека: {e}\nСредства возвращены на баланс.")
 
@@ -303,7 +297,6 @@ async def topup_custom_amount(message: Message, state: FSMContext):
         return
 
     await state.clear()
-    # Создаём инвойс через сообщение
     try:
         invoice = await cryptopay.create_invoice(
             amount=amount,
@@ -315,8 +308,9 @@ async def topup_custom_amount(message: Message, state: FSMContext):
         await message.answer(
             f"💳 Счёт на <b>{amount}$</b> создан.\n\n"
             f"Оплатите по ссылке:\n{invoice['bot_invoice_url']}\n\n"
-            f"После оплаты баланс пополнится автоматически.",
-            parse_mode="HTML"
+            f"После оплаты нажмите кнопку ниже:",
+            parse_mode="HTML",
+            reply_markup=invoice_keyboard(invoice["invoice_id"])
         )
     except Exception as e:
         await message.answer(f"❌ Ошибка создания счёта: {e}")
@@ -334,13 +328,56 @@ async def _create_topup_invoice(callback: CallbackQuery, amount: float):
         await callback.message.edit_text(
             f"💳 Счёт на <b>{amount}$</b> создан.\n\n"
             f"Оплатите по ссылке:\n{invoice['bot_invoice_url']}\n\n"
-            f"После оплаты баланс пополнится автоматически.",
+            f"После оплаты нажмите кнопку ниже:",
             parse_mode="HTML",
-            reply_markup=back_keyboard()
+            reply_markup=invoice_keyboard(invoice["invoice_id"])
         )
     except Exception as e:
         await callback.message.edit_text(f"❌ Ошибка создания счёта: {e}")
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("check_pay:"))
+async def check_payment(callback: CallbackQuery):
+    """Проверяет оплату инвойса и зачисляет баланс."""
+    invoice_id = int(callback.data.split(":")[1])
+    row = await db.get_invoice(invoice_id)
+
+    if not row:
+        await callback.answer("Счёт не найден", show_alert=True)
+        return
+
+    if row["status"] == "paid":
+        await callback.answer("Этот счёт уже зачислен", show_alert=True)
+        return
+
+    if row["user_id"] != callback.from_user.id:
+        await callback.answer("Это не ваш счёт", show_alert=True)
+        return
+
+    try:
+        paid = await cryptopay.check_invoice_paid(invoice_id)
+    except Exception as e:
+        await callback.answer(f"Ошибка проверки: {e}", show_alert=True)
+        return
+
+    if not paid:
+        await callback.answer("Оплата ещё не поступила. Подождите минуту и нажмите снова.", show_alert=True)
+        return
+
+    amount = float(row["amount"])
+    await db.mark_invoice_paid(invoice_id)
+    await db.update_balance(callback.from_user.id, amount)
+
+    user = await db.get_user(callback.from_user.id)
+    await callback.message.edit_text(
+        f"✅ Оплата подтверждена!\n\n"
+        f"На баланс зачислено: <b>{amount}$</b>\n"
+        f"Текущий баланс: <b>{user.balance:.2f}$</b>",
+        parse_mode="HTML",
+        reply_markup=back_keyboard()
+    )
+    await callback.answer("Баланс пополнен!")
 
 
 # ──────────────────── ПОДДЕРЖКА / КАНАЛ ────────────────────

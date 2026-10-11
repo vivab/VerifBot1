@@ -1,9 +1,6 @@
 import logging
 from typing import Optional
 
-from CryptoPayAPI.AioCryptoPay import AioCryptoPay
-from CryptoPayAPI.types.asset import USDT
-
 from bot.config import settings
 
 logger = logging.getLogger(__name__)
@@ -11,32 +8,43 @@ logger = logging.getLogger(__name__)
 
 class CryptoPayService:
     def __init__(self):
-        self.client: Optional[AioCryptoPay] = None
+        self.client = None
+        self.enabled = False
 
     async def start(self):
-        self.client = AioCryptoPay(
-            token=settings.CRYPTOPAY_TOKEN,
-            is_test_net=settings.CRYPTOPAY_TESTNET
-        )
-        me = await self.client.get_me()
-        logger.info(f"CryptoPay connected: {me}")
+        try:
+            from CryptoPayAPI.AioCryptoPay import AioCryptoPay
+
+            self.client = AioCryptoPay(
+                token=settings.CRYPTOPAY_TOKEN,
+                is_test_net=settings.CRYPTOPAY_TESTNET
+            )
+            me = await self.client.get_me()
+            self.enabled = True
+            logger.info(f"CryptoPay OK: {me}")
+        except Exception as e:
+            self.enabled = False
+            self.client = None
+            logger.error(f"CryptoPay не подключился: {e}")
+            logger.warning("Бот работает БЕЗ платежей и вывода. Исправь CRYPTOPAY_TOKEN.")
 
     async def close(self):
         if self.client:
-            await self.client.close()
+            try:
+                await self.client.close()
+            except Exception:
+                pass
 
-    async def create_invoice(self, amount: float, description: str = "",
-                             payload: str = "") -> dict:
-        """
-        Создаёт инвойс.
-        Возвращает dict с bot_invoice_url, invoice_id и т.д.
-        """
+    async def create_invoice(self, amount: float, description: str = "", payload: str = "") -> dict:
+        if not self.enabled:
+            raise Exception("CryptoPay не подключён. Проверь токен.")
+        from CryptoPayAPI.types.asset import USDT
         invoice = await self.client.create_invoice(
             amount=amount,
             asset=USDT,
             description=description or f"Оплата {amount}$",
             payload=payload,
-            expires_in=3600,  # 1 час
+            expires_in=3600,
         )
         return {
             "invoice_id": invoice.invoice_id,
@@ -45,25 +53,11 @@ class CryptoPayService:
             "status": invoice.status,
         }
 
-    async def get_invoice(self, invoice_id: int):
-        invoices = await self.client.get_invoices(invoice_ids=str(invoice_id))
-        if invoices:
-            return invoices[0]
-        return None
-
-    async def check_invoice_paid(self, invoice_id: int) -> bool:
-        invoice = await self.get_invoice(invoice_id)
-        return invoice is not None and invoice.status == "paid"
-
     async def create_check(self, amount: float, asset: str = "USDT") -> dict:
-        """
-        Создаёт чек для вывода (авто-вывод).
-        """
-        # CryptoPay createCheck
-        check = await self.client.create_check(
-            asset=USDT,
-            amount=amount,
-        )
+        if not self.enabled:
+            raise Exception("CryptoPay не подключён. Проверь токен.")
+        from CryptoPayAPI.types.asset import USDT
+        check = await self.client.create_check(asset=USDT, amount=amount)
         return {
             "check_id": check.check_id,
             "bot_check_url": check.bot_check_url,

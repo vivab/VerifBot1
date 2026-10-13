@@ -8,7 +8,8 @@ from bot.database.db import db
 from bot.database.models import UserRole, EntryType
 from bot.keyboards.owner_kb import (
     owner_panel_keyboard, products_list_keyboard, entry_type_keyboard,
-    cancel_to_panel, confirm_keyboard
+    cancel_to_panel, confirm_keyboard, catalog_delete_list_keyboard,
+    catalog_delete_confirm_keyboard
 )
 from bot.keyboards.user_kb import main_menu
 from bot.states.states import (
@@ -26,6 +27,128 @@ def is_owner_or_admin(user) -> bool:
 
 def is_owner(user) -> bool:
     return user and user.role == UserRole.OWNER
+
+
+
+
+# ──────────────────── УДАЛЕНИЕ МАНУАЛОВ / TG-АККАУНТОВ / TG-ПОЗИЦИЙ ────────────────────
+
+_DELETE_PAGE_SIZE = 8
+_DELETE_KINDS = {
+    "manual": "📘 Мануалы",
+    "tg_stock": "📦 Непроданные Telegram-аккаунты",
+    "tg_offer": "📱 Telegram-позиции",
+}
+
+
+async def _show_delete_catalog(callback: CallbackQuery, kind: str, page: int):
+    offset = page * _DELETE_PAGE_SIZE
+    if kind == "manual":
+        rows = await db.list_active_manuals(_DELETE_PAGE_SIZE + 1, offset)
+    elif kind == "tg_stock":
+        rows = await db.list_unsold_tg_stock(_DELETE_PAGE_SIZE + 1, offset)
+    else:
+        rows = await db.list_active_tg_offers(_DELETE_PAGE_SIZE + 1, offset)
+    await callback.message.edit_text(
+        f"🗑 <b>{_DELETE_KINDS[kind]}</b>\n\n"
+        + ("Выберите, что убрать из продажи:" if rows else "Здесь пока нет доступных позиций."),
+        reply_markup=catalog_delete_list_keyboard(
+            rows[:_DELETE_PAGE_SIZE], kind, page, len(rows) > _DELETE_PAGE_SIZE
+        ),
+    )
+
+
+@router.callback_query(F.data.in_({
+    "owner:remove_manual", "owner:remove_tg_stock", "owner:remove_tg_offer"
+}))
+async def owner_remove_start(callback: CallbackQuery):
+    user = await db.get_user(callback.from_user.id)
+    if not is_owner(user):
+        await callback.answer("Удаление доступно только владельцу.", show_alert=True)
+        return
+    kind = callback.data.removeprefix("owner:remove_")
+    await _show_delete_catalog(callback, kind, 0)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("owner:remove:"))
+async def owner_remove_action(callback: CallbackQuery):
+    user = await db.get_user(callback.from_user.id)
+    if not is_owner(user):
+        await callback.answer("Удаление доступно только владельцу.", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    try:
+        if len(parts) not in (5, 6):
+            raise ValueError
+        _, _, kind, action, *args = parts
+        if kind not in _DELETE_KINDS or action not in ("page", "ask", "yes"):
+            raise ValueError
+        if action == "page":
+            if len(args) != 1:
+                raise ValueError
+            page = int(args[0])
+            item_id = None
+        else:
+            if len(args) != 2:
+                raise ValueError
+            item_id, page = int(args[0]), int(args[1])
+            if item_id <= 0:
+                raise ValueError
+        if not 0 <= page <= 10000:
+            raise ValueError
+    except (ValueError, TypeError):
+        await callback.answer("Неверный запрос.", show_alert=True)
+        return
+
+    if action == "page":
+        await _show_delete_catalog(callback, kind, page)
+        await callback.answer()
+        return
+
+    if action == "ask":
+        if kind == "manual":
+            row = await db.get_manual(item_id)
+            valid = bool(row and row["is_active"])
+            item_name = f"Мануал «{escape(row['name'])}»" if valid else ""
+        elif kind == "tg_stock":
+            row = await db.get_unsold_tg_stock(item_id)
+            valid = bool(row)
+            item_name = (
+                f"Аккаунт #{item_id}: {escape(row['country'])} / "
+                f"{escape(row['age_label'])}, номер ••••{escape(row['phone'][-4:])}"
+            ) if valid else ""
+        else:
+            row = await db.get_tg_offer(item_id)
+            valid = bool(row and row["is_active"])
+            item_name = (
+                f"TG-позиция #{item_id}: {escape(row['country'])} / "
+                f"{escape(row['age_label'])}"
+            ) if valid else ""
+        if not valid:
+            await callback.answer("Уже удалено или недоступно.", show_alert=True)
+            return
+        await callback.message.edit_text(
+            f"❗ <b>Подтвердите удаление из каталога</b>\n\n"
+            f"{item_name}\n\n"
+            "Проданные аккаунты не затрагиваются, а мануалы у прежних покупателей останутся.",
+            reply_markup=catalog_delete_confirm_keyboard(kind, item_id, page),
+        )
+        await callback.answer()
+        return
+
+    if kind == "manual":
+        removed = await db.delete_manual(item_id)
+    elif kind == "tg_stock":
+        removed = await db.remove_unsold_tg_stock(item_id)
+    else:
+        removed = await db.delete_tg_offer(item_id)
+    await _show_delete_catalog(callback, kind, page)
+    await callback.answer(
+        "✅ Убрано из продажи." if removed else "Позиция уже удалена или была продана.",
+        show_alert=True,
+    )
 
 
 # ──────────────────── ПАНЕЛЬ ────────────────────

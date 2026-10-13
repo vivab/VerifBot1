@@ -568,9 +568,21 @@ class Database:
         async with self.conn.execute(q) as c:
             return await c.fetchall()
 
-    async def delete_manual(self, manual_id: int):
-        await self.conn.execute("UPDATE manuals SET is_active = 0 WHERE id = ?", (manual_id,))
+    async def delete_manual(self, manual_id: int) -> bool:
+        cursor = await self.conn.execute(
+            "UPDATE manuals SET is_active = 0 WHERE id = ? AND is_active = 1",
+            (manual_id,)
+        )
         await self.conn.commit()
+        return cursor.rowcount == 1
+
+    async def list_active_manuals(self, limit: int = 9, offset: int = 0):
+        async with self.conn.execute(
+            """SELECT id, name, buyer_price FROM manuals
+               WHERE is_active = 1 ORDER BY id DESC LIMIT ? OFFSET ?""",
+            (limit, offset)
+        ) as cursor:
+            return await cursor.fetchall()
 
     # ──────────────────── TG OFFERS / STOCK ────────────────────
 
@@ -582,6 +594,46 @@ class Database:
         )
         await self.conn.commit()
         return cur.lastrowid
+
+    async def list_active_tg_offers(self, limit: int = 9, offset: int = 0):
+        async with self.conn.execute(
+            """SELECT id, country, age_label, buyer_price FROM tg_offers
+               WHERE is_active = 1 ORDER BY id DESC LIMIT ? OFFSET ?""",
+            (limit, offset)
+        ) as cursor:
+            return await cursor.fetchall()
+
+    async def delete_tg_offer(self, offer_id: int) -> bool:
+        cursor = await self.conn.execute(
+            "UPDATE tg_offers SET is_active = 0 WHERE id = ? AND is_active = 1",
+            (offer_id,)
+        )
+        await self.conn.commit()
+        return cursor.rowcount == 1
+
+    async def list_unsold_tg_stock(self, limit: int = 9, offset: int = 0):
+        async with self.conn.execute(
+            """SELECT id, country, age_label, phone FROM tg_stock
+               WHERE is_sold = 0 ORDER BY id DESC LIMIT ? OFFSET ?""",
+            (limit, offset)
+        ) as cursor:
+            return await cursor.fetchall()
+
+    async def get_unsold_tg_stock(self, stock_id: int):
+        async with self.conn.execute(
+            """SELECT id, country, age_label, phone FROM tg_stock
+               WHERE id = ? AND is_sold = 0""", (stock_id,)
+        ) as cursor:
+            return await cursor.fetchone()
+
+    async def remove_unsold_tg_stock(self, stock_id: int) -> bool:
+        """Remove only unsold stock; preserve delivered orders and wipe session."""
+        cursor = await self.conn.execute(
+            """UPDATE tg_stock SET is_sold = 2, session_string = NULL
+               WHERE id = ? AND is_sold = 0""", (stock_id,)
+        )
+        await self.conn.commit()
+        return cursor.rowcount == 1
 
     async def get_tg_countries(self):
         async with self.conn.execute(
@@ -619,9 +671,12 @@ class Database:
             row = await c.fetchone()
         if not row:
             return None
-        await self.conn.execute("UPDATE tg_stock SET is_sold = 1 WHERE id = ?", (row["id"],))
+        cursor = await self.conn.execute(
+            "UPDATE tg_stock SET is_sold = 1 WHERE id = ? AND is_sold = 0",
+            (row["id"],)
+        )
         await self.conn.commit()
-        return row
+        return row if cursor.rowcount == 1 else None
 
     async def add_tg_stock(self, country: str, age_label: str, phone: str,
                            session_string: str = None, session_type: str = "string",

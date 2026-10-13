@@ -13,7 +13,7 @@ def main_menu(role: UserRole) -> ReplyKeyboardMarkup:
     ]
 
     if role in (UserRole.SELLER, UserRole.ADMIN, UserRole.OWNER):
-        buttons.append([KeyboardButton(text="📋 Мои заказы")])
+        buttons.append([KeyboardButton(text="📋 Мои заказы"), KeyboardButton(text="📦 Загрузить акк")])
 
     if role in (UserRole.ADMIN, UserRole.OWNER):
         panel_text = "👑 Панель владельца" if role == UserRole.OWNER else "🛠 Админ-панель"

@@ -1,5 +1,5 @@
 from enum import Enum
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 from datetime import datetime
 
@@ -12,15 +12,29 @@ class UserRole(str, Enum):
 
 
 class OrderStatus(str, Enum):
-    PENDING = "pending"          # Ожидает продавца
-    IN_PROGRESS = "in_progress"  # Взят продавцом
-    COMPLETED = "completed"      # Завершён
-    CANCELLED = "cancelled"      # Отменён
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    AWAITING_CODE = "awaiting_code"
 
 
 class EntryType(str, Enum):
     EMAIL = "email"
     TELEGRAM = "telegram"
+    NONE = "none"
+
+
+class CategoryType(str, Enum):
+    VERIFICATION = "verification"
+    MANUAL = "manual"
+    TG_ACCOUNT = "tg_account"
+
+
+class ManualDelivery(str, Enum):
+    TEXT = "text"
+    FILE = "file"
+    BOTH = "both"
 
 
 @dataclass
@@ -32,8 +46,8 @@ class User:
     balance: float
     turnover: float
     verifications_bought: int
-    verifications_done: int      # только для продавцов
-    earned: float                # только для продавцов
+    verifications_done: int
+    earned: float
     registered_at: datetime
     is_banned: bool = False
 
@@ -46,6 +60,41 @@ class Product:
     seller_price: float
     entry_type: EntryType
     is_active: bool = True
+    category: str = "verification"
+
+
+@dataclass
+class Manual:
+    id: int
+    name: str
+    buyer_price: float
+    delivery_type: str
+    content_text: Optional[str]
+    file_id: Optional[str]
+    is_active: bool = True
+
+
+@dataclass
+class TgAccountStock:
+    id: int
+    country: str
+    age_label: str
+    phone: str
+    session_string: Optional[str]
+    session_type: str
+    is_sold: bool
+    seller_id: Optional[int]
+    added_at: datetime
+
+
+@dataclass
+class TgAccountOffer:
+    id: int
+    country: str
+    age_label: str
+    buyer_price: float
+    seller_price: float
+    is_active: bool = True
 
 
 @dataclass
@@ -53,20 +102,17 @@ class Order:
     id: int
     buyer_id: int
     seller_id: Optional[int]
-    product_id: int
+    product_id: Optional[int]
     product_name: str
     buyer_price: float
     seller_price: float
     entry_type: EntryType
     status: OrderStatus
-    # Данные входа (удаляются после завершения)
-    entry_data: Optional[str]    # JSON: {"email": "...", "password": "..."} или {"phone": "...", "code": "..."}
-    created_at: datetime
-    taken_at: Optional[datetime]
-    completed_at: Optional[datetime]
-
-
-@dataclass
-class SettingsDB:
-    key: str
-    value: str
+    entry_data: Optional[str]
+    category: str = "verification"
+    stock_id: Optional[int] = None
+    phone: Optional[str] = None
+    created_at: datetime = field(default_factory=datetime.utcnow)
+    taken_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    auto_complete_at: Optional[datetime] = None

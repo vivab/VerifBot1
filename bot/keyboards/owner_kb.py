@@ -19,6 +19,7 @@ def owner_panel_keyboard(is_owner: bool = True) -> InlineKeyboardMarkup:
     if is_owner:
         builder.button(text="🛡 Добавить админа", callback_data="owner:add_admin")
 
+    builder.button(text="📘 Мануалы (команды)", callback_data="owner:add_manual")
     builder.button(text="📢 Рассылка", callback_data="owner:broadcast")
     builder.button(text="🔗 Ссылка поддержки", callback_data="owner:support_link")
     builder.button(text="📡 Ссылка канала", callback_data="owner:channel_link")

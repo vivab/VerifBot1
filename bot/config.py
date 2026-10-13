@@ -1,5 +1,4 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import Optional
 
 
 class Settings(BaseSettings):
@@ -9,14 +8,19 @@ class Settings(BaseSettings):
     OWNER_ID: int
 
     CRYPTOPAY_TOKEN: str
-    CRYPTOPAY_TESTNET: bool = True
+    CRYPTOPAY_TESTNET: bool = False
 
-    # Дефолтные значения (можно менять через панель владельца)
     SUPPORT_USERNAME: str = "@support"
     CHANNEL_URL: str = "https://t.me/channel"
 
-    # База данных
+    # Telegram Client API (my.telegram.org) — для входа в аккаунты
+    TELEGRAM_API_ID: int = 0
+    TELEGRAM_API_HASH: str = ""
+
     DB_PATH: str = "data/bot.db"
+
+    # Авто-завершение заказа TG-аккаунта (часы)
+    TG_ORDER_HOURS: int = 3
 
 
 settings = Settings()

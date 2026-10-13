@@ -10,6 +10,11 @@ from bot.keyboards.user_kb import (
     profile_keyboard, topup_amounts_keyboard, cancel_keyboard, main_menu,
     invoice_keyboard
 )
+from bot.keyboards.catalog_kb import (
+    categories_keyboard, manuals_keyboard, confirm_manual_keyboard,
+    tg_countries_keyboard, tg_ages_keyboard, confirm_tg_keyboard, tg_order_keyboard
+)
+from bot.config import settings as app_settings
 from bot.keyboards.seller_kb import new_order_keyboard
 from bot.states.states import TopUpStates, BuyStates, WithdrawStates
 from bot.services.cryptopay import cryptopay
@@ -22,25 +27,230 @@ router = Router()
 
 @router.message(F.text == "🛍️ Каталог")
 async def catalog(message: Message):
-    products = await db.get_all_products(only_active=True)
-    if not products:
-        await message.answer("📭 Каталог пока пуст.", reply_markup=back_keyboard())
-        return
-
-    text = "🛍️ <b>Каталог верификаций</b>\n\nВыберите нужную позицию:"
-    await message.answer(text, reply_markup=catalog_keyboard(products), parse_mode="HTML")
+    await message.answer(
+        "🛍️ <b>Каталог</b>\n\nВыберите категорию:",
+        reply_markup=categories_keyboard(),
+        parse_mode="HTML"
+    )
 
 
 @router.callback_query(F.data == "catalog")
 async def catalog_cb(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "🛍️ <b>Каталог</b>\n\nВыберите категорию:",
+        reply_markup=categories_keyboard(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "cat:verification")
+async def cat_verification(callback: CallbackQuery):
     products = await db.get_all_products(only_active=True)
     if not products:
-        await callback.message.edit_text("📭 Каталог пока пуст.", reply_markup=back_keyboard())
+        await callback.message.edit_text("📭 Верификаций пока нет.", reply_markup=categories_keyboard())
         await callback.answer()
         return
+    await callback.message.edit_text(
+        "👥 <b>Верификации</b>\n\nВыберите позицию:",
+        reply_markup=catalog_keyboard(products),
+        parse_mode="HTML"
+    )
+    await callback.answer()
 
-    text = "🛍️ <b>Каталог верификаций</b>\n\nВыберите нужную позицию:"
-    await callback.message.edit_text(text, reply_markup=catalog_keyboard(products), parse_mode="HTML")
+
+@router.callback_query(F.data == "cat:manual")
+async def cat_manual(callback: CallbackQuery):
+    manuals = await db.get_all_manuals(only_active=True)
+    if not manuals:
+        await callback.message.edit_text("📭 Мануалов пока нет.", reply_markup=categories_keyboard())
+        await callback.answer()
+        return
+    await callback.message.edit_text(
+        "📘 <b>Мануалы</b>\n\nВыберите:",
+        reply_markup=manuals_keyboard(manuals),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("manual:"))
+async def manual_view(callback: CallbackQuery):
+    mid = int(callback.data.split(":")[1])
+    m = await db.get_manual(mid)
+    if not m or not m["is_active"]:
+        await callback.answer("Недоступно", show_alert=True)
+        return
+    user = await db.get_user(callback.from_user.id)
+    await callback.message.edit_text(
+        f"📘 <b>{m['name']}</b>\n\n💰 Цена: <b>{m['buyer_price']}$</b>\n"
+        f"Ваш баланс: {user.balance:.2f}$",
+        reply_markup=confirm_manual_keyboard(mid),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("buy_manual:"))
+async def buy_manual(callback: CallbackQuery):
+    mid = int(callback.data.split(":")[1])
+    m = await db.get_manual(mid)
+    if not m or not m["is_active"]:
+        await callback.answer("Недоступно", show_alert=True)
+        return
+    user = await db.get_user(callback.from_user.id)
+    if user.balance < m["buyer_price"]:
+        await callback.answer(f"Недостаточно средств. Нужно {m['buyer_price']}$", show_alert=True)
+        return
+    await db.update_balance(user.user_id, -m["buyer_price"])
+    await db.add_turnover(user.user_id, m["buyer_price"])
+    await db.create_manual_order(user.user_id, m)
+
+    await callback.message.edit_text(f"✅ Мануал <b>{m['name']}</b> куплен!", parse_mode="HTML")
+    if m["content_text"]:
+        await callback.message.answer(m["content_text"])
+    if m["file_id"]:
+        try:
+            await callback.message.answer_document(m["file_id"])
+        except Exception:
+            try:
+                await callback.message.answer_photo(m["file_id"])
+            except Exception:
+                await callback.message.answer("(файл не удалось отправить, обратитесь в поддержку)")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "cat:tg")
+async def cat_tg(callback: CallbackQuery):
+    countries = await db.get_tg_countries()
+    if not countries:
+        await callback.message.edit_text("📭 Аккаунтов пока нет.", reply_markup=categories_keyboard())
+        await callback.answer()
+        return
+    await callback.message.edit_text(
+        "📱 <b>Telegram аккаунты</b>\n\nВыберите страну:",
+        reply_markup=tg_countries_keyboard(countries),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("tg_country:"))
+async def tg_country(callback: CallbackQuery):
+    country = callback.data.split(":", 1)[1]
+    offers = await db.get_tg_offers_by_country(country)
+    if not offers:
+        await callback.answer("Нет предложений", show_alert=True)
+        return
+    lines = []
+    for o in offers:
+        stock = await db.count_tg_stock(o["country"], o["age_label"])
+        lines.append(f"{o['age_label']} — {o['buyer_price']}$ (в наличии: {stock})")
+    await callback.message.edit_text(
+        f"📱 <b>{country}</b>\n\n" + "\n".join(lines) + "\n\nВыберите:",
+        reply_markup=tg_ages_keyboard(country, offers),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("tg_offer:"))
+async def tg_offer_view(callback: CallbackQuery):
+    oid = int(callback.data.split(":")[1])
+    o = await db.get_tg_offer(oid)
+    if not o:
+        await callback.answer("Не найдено", show_alert=True)
+        return
+    stock = await db.count_tg_stock(o["country"], o["age_label"])
+    user = await db.get_user(callback.from_user.id)
+    await callback.message.edit_text(
+        f"📱 <b>{o['country']}</b> — {o['age_label']}\n\n"
+        f"💰 Цена: <b>{o['buyer_price']}$</b>\n"
+        f"В наличии: {stock}\n"
+        f"Ваш баланс: {user.balance:.2f}$",
+        reply_markup=confirm_tg_keyboard(oid),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("buy_tg:"))
+async def buy_tg(callback: CallbackQuery):
+    oid = int(callback.data.split(":")[1])
+    o = await db.get_tg_offer(oid)
+    if not o or not o["is_active"]:
+        await callback.answer("Недоступно", show_alert=True)
+        return
+    user = await db.get_user(callback.from_user.id)
+    if user.balance < o["buyer_price"]:
+        await callback.answer(f"Недостаточно средств. Нужно {o['buyer_price']}$", show_alert=True)
+        return
+    stock = await db.take_tg_stock(o["country"], o["age_label"])
+    if not stock:
+        await callback.answer("Нет в наличии", show_alert=True)
+        return
+    await db.update_balance(user.user_id, -o["buyer_price"])
+    await db.add_turnover(user.user_id, o["buyer_price"])
+    hours = getattr(app_settings, "TG_ORDER_HOURS", 3)
+    order_id = await db.create_tg_account_order(user.user_id, o, stock, hours=hours)
+
+    # Начислить продавцу если есть
+    if stock["seller_id"] and o["seller_price"] > 0:
+        await db.update_balance(stock["seller_id"], o["seller_price"])
+        await db.add_seller_stats(stock["seller_id"], o["seller_price"])
+
+    await callback.message.edit_text(
+        f"✅ Аккаунт выдан! Заказ <b>#{order_id}</b>\n\n"
+        f"Страна: {o['country']}\n"
+        f"Тип: {o['age_label']}\n"
+        f"Номер: <code>{stock['phone']}</code>\n\n"
+        f"1. Нажмите «Запросить код» когда будете входить\n"
+        f"2. После входа — «Завершить заказ»\n"
+        f"3. Авто-завершение через {hours} ч.",
+        reply_markup=tg_order_keyboard(order_id),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("tg_code:"))
+async def tg_request_code(callback: CallbackQuery):
+    order_id = int(callback.data.split(":")[1])
+    order = await db.get_order(order_id)
+    if not order or order.buyer_id != callback.from_user.id:
+        await callback.answer("Заказ не найден", show_alert=True)
+        return
+    if order.status == OrderStatus.COMPLETED:
+        await callback.answer("Заказ уже завершён", show_alert=True)
+        return
+    stock = await db.get_tg_stock(order.stock_id) if order.stock_id else None
+    if not stock or not stock["session_string"]:
+        await callback.answer("Сессия аккаунта недоступна. Напишите в поддержку.", show_alert=True)
+        return
+    from bot.services import telegram_client as tg
+    ok, code_or_err = await tg.get_last_login_code(stock["session_string"])
+    if not ok:
+        await callback.answer(f"Не удалось: {code_or_err}", show_alert=True)
+        return
+    await callback.message.answer(
+        f"📩 Код для заказа #{order_id}:\n\n<code>{code_or_err}</code>",
+        parse_mode="HTML"
+    )
+    await callback.answer("Код отправлен")
+
+
+@router.callback_query(F.data.startswith("tg_done:"))
+async def tg_complete(callback: CallbackQuery):
+    order_id = int(callback.data.split(":")[1])
+    order = await db.get_order(order_id)
+    if not order or order.buyer_id != callback.from_user.id:
+        await callback.answer("Заказ не найден", show_alert=True)
+        return
+    if order.status == OrderStatus.COMPLETED:
+        await callback.answer("Уже завершён", show_alert=True)
+        return
+    await db.complete_order(order_id)
+    await callback.message.edit_text(f"✅ Заказ #{order_id} завершён. Удачного использования!")
     await callback.answer()
 
 
@@ -73,6 +283,7 @@ async def confirm_buy(callback: CallbackQuery, state: FSMContext):
 
     user = await db.get_user(callback.from_user.id)
 
+    # Проверяем баланс
     if user.balance < product.buyer_price:
         await callback.answer(
             f"Недостаточно средств. Нужно {product.buyer_price}$, у вас {user.balance:.2f}$",
@@ -80,24 +291,18 @@ async def confirm_buy(callback: CallbackQuery, state: FSMContext):
         )
         return
 
+    # Списываем сразу
     await db.update_balance(user.user_id, -product.buyer_price)
     await db.add_turnover(user.user_id, product.buyer_price)
 
-    await state.set_state(BuyStates.waiting_entry_data)
     await state.update_data(product_id=product_id)
 
     if product.entry_type == EntryType.EMAIL:
-        text = (
-            "📧 Отправьте данные для входа в формате:\n\n"
-            "<code>email@example.com\nпароль</code>\n\n"
-            "(каждая строка — отдельно)"
-        )
+        await state.set_state(BuyStates.waiting_email)
+        text = "📧 Отправьте <b>email</b> (почту) для входа:"
     else:
-        text = (
-            "📱 Отправьте данные Telegram-аккаунта в формате:\n\n"
-            "<code>+79001234567\nкод_из_смс</code>\n\n"
-            "(номер и код — каждая строка отдельно)"
-        )
+        await state.set_state(BuyStates.waiting_phone)
+        text = "📱 Отправьте <b>номер телефона</b> в международном формате:\n<code>+79001234567</code>"
 
     await callback.message.edit_text(text, reply_markup=cancel_keyboard(), parse_mode="HTML")
     await callback.answer()
@@ -124,6 +329,7 @@ async def process_entry_data(message: Message, state: FSMContext, bot: Bot):
     else:
         entry_data = {"phone": lines[0], "code": lines[1]}
 
+    # Создаём заказ
     order_id = await db.create_order(
         buyer_id=message.from_user.id,
         product=product,
@@ -139,6 +345,7 @@ async def process_entry_data(message: Message, state: FSMContext, bot: Bot):
         reply_markup=main_menu((await db.get_user(message.from_user.id)).role)
     )
 
+    # Уведомляем всех продавцов
     sellers = await db.get_users_by_role(UserRole.SELLER)
     admins = await db.get_users_by_role(UserRole.ADMIN)
     owners = await db.get_users_by_role(UserRole.OWNER)
@@ -238,6 +445,7 @@ async def withdraw_amount(message: Message, state: FSMContext):
         await message.answer(f"Недостаточно средств. Баланс: {user.balance:.2f}$")
         return
 
+    # Списываем
     await db.update_balance(user.user_id, -amount)
 
     try:
@@ -250,6 +458,7 @@ async def withdraw_amount(message: Message, state: FSMContext):
             reply_markup=main_menu(user.role)
         )
     except Exception as e:
+        # Возвращаем деньги при ошибке
         await db.update_balance(user.user_id, amount)
         await message.answer(f"❌ Ошибка создания чека: {e}\nСредства возвращены на баланс.")
 
@@ -365,6 +574,7 @@ async def check_payment(callback: CallbackQuery):
         await callback.answer("Оплата ещё не поступила. Подождите минуту и нажмите снова.", show_alert=True)
         return
 
+    # Зачисляем
     amount = float(row["amount"])
     await db.mark_invoice_paid(invoice_id)
     await db.update_balance(callback.from_user.id, amount)
@@ -378,6 +588,135 @@ async def check_payment(callback: CallbackQuery):
         reply_markup=back_keyboard()
     )
     await callback.answer("Баланс пополнен!")
+
+
+
+
+@router.message(BuyStates.waiting_phone)
+async def buy_phone(message: Message, state: FSMContext):
+    phone = message.text.strip().replace(" ", "")
+    if not phone.startswith("+") or len(phone) < 10:
+        await message.answer("Номер должен быть в формате +79001234567")
+        return
+    await state.update_data(phone=phone)
+    await state.set_state(BuyStates.waiting_code)
+    await message.answer(
+        f"Номер: <code>{phone}</code>\n\n"
+        "Теперь отправьте <b>код из Telegram/SMS</b>.\n"
+        "Бот войдёт в аккаунт на время верификации.",
+        parse_mode="HTML",
+        reply_markup=cancel_keyboard()
+    )
+
+
+@router.message(BuyStates.waiting_code)
+async def buy_code(message: Message, state: FSMContext, bot: Bot):
+    code = message.text.strip()
+    data = await state.get_data()
+    product = await db.get_product(data.get("product_id"))
+    if not product:
+        await state.clear()
+        await message.answer("Ошибка позиции")
+        return
+    entry_data = {"phone": data["phone"], "code": code}
+    # Пробуем войти (если API настроено)
+    try:
+        from bot.services import telegram_client as tg
+        ok, msg = await tg.login_with_phone(data["phone"])
+        if ok:
+            ok2, msg2, sess = await tg.confirm_code(data["phone"], code)
+            if ok2 and sess:
+                entry_data["session"] = sess
+                entry_data["bot_logged_in"] = True
+            else:
+                entry_data["bot_logged_in"] = False
+                entry_data["login_error"] = msg2
+        else:
+            entry_data["bot_logged_in"] = False
+            entry_data["login_error"] = msg
+    except Exception as e:
+        entry_data["bot_logged_in"] = False
+        entry_data["login_error"] = str(e)
+
+    order_id = await db.create_order(message.from_user.id, product, entry_data)
+    await state.clear()
+    extra = ""
+    if entry_data.get("bot_logged_in"):
+        extra = "\n🤖 Бот вошёл в аккаунт — продавец сможет работать."
+    elif entry_data.get("login_error"):
+        extra = f"\n⚠️ Авто-вход не удался ({entry_data['login_error']}). Данные переданы продавцу."
+
+    await message.answer(
+        f"✅ Заказ <b>#{order_id}</b> создан!\nСервис: {product.name}{extra}",
+        parse_mode="HTML",
+        reply_markup=main_menu((await db.get_user(message.from_user.id)).role)
+    )
+    # notify sellers
+    sellers = await db.get_users_by_role(UserRole.SELLER)
+    admins = await db.get_users_by_role(UserRole.ADMIN)
+    owners = await db.get_users_by_role(UserRole.OWNER)
+    recipients = {u.user_id for u in sellers + admins + owners}
+    notify = (
+        f"🆕 <b>Новый заказ! #{order_id}</b>\n\n"
+        f"Сервис: <b>{product.name}</b>\n"
+        f"Оплата продавцу: <b>{product.seller_price}$</b>\n"
+        f"Вход через: Telegram\n"
+        f"Номер: <code>{data['phone']}</code>"
+    )
+    from bot.keyboards.seller_kb import new_order_keyboard
+    for uid in recipients:
+        try:
+            await bot.send_message(uid, notify, reply_markup=new_order_keyboard(order_id), parse_mode="HTML")
+        except Exception:
+            pass
+
+
+@router.message(BuyStates.waiting_email)
+async def buy_email(message: Message, state: FSMContext):
+    email = message.text.strip()
+    if "@" not in email:
+        await message.answer("Введите корректный email")
+        return
+    await state.update_data(email=email)
+    await state.set_state(BuyStates.waiting_email_pass)
+    await message.answer("🔑 Отправьте <b>пароль</b> от почты:", parse_mode="HTML", reply_markup=cancel_keyboard())
+
+
+@router.message(BuyStates.waiting_email_pass)
+async def buy_email_pass(message: Message, state: FSMContext, bot: Bot):
+    password = message.text.strip()
+    data = await state.get_data()
+    product = await db.get_product(data.get("product_id"))
+    if not product:
+        await state.clear()
+        await message.answer("Ошибка")
+        return
+    entry_data = {"email": data["email"], "password": password}
+    order_id = await db.create_order(message.from_user.id, product, entry_data)
+    await state.clear()
+    await message.answer(
+        f"✅ Заказ <b>#{order_id}</b> создан!\nСервис: {product.name}",
+        parse_mode="HTML",
+        reply_markup=main_menu((await db.get_user(message.from_user.id)).role)
+    )
+    sellers = await db.get_users_by_role(UserRole.SELLER)
+    admins = await db.get_users_by_role(UserRole.ADMIN)
+    owners = await db.get_users_by_role(UserRole.OWNER)
+    recipients = {u.user_id for u in sellers + admins + owners}
+    notify = (
+        f"🆕 <b>Новый заказ! #{order_id}</b>\n\n"
+        f"Сервис: <b>{product.name}</b>\n"
+        f"Оплата продавцу: <b>{product.seller_price}$</b>\n"
+        f"Вход через: Почта\n"
+        f"Email: <code>{data['email']}</code>"
+    )
+    from bot.keyboards.seller_kb import new_order_keyboard
+    for uid in recipients:
+        try:
+            await bot.send_message(uid, notify, reply_markup=new_order_keyboard(order_id), parse_mode="HTML")
+        except Exception:
+            pass
+
 
 
 # ──────────────────── ПОДДЕРЖКА / КАНАЛ ────────────────────

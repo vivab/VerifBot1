@@ -6,7 +6,11 @@ class TopUpStates(StatesGroup):
 
 
 class BuyStates(StatesGroup):
-    waiting_entry_data = State()  # ждём email/password или phone/code
+    waiting_entry_data = State()
+    waiting_phone = State()
+    waiting_code = State()
+    waiting_email = State()
+    waiting_email_pass = State()
 
 
 class WithdrawStates(StatesGroup):
@@ -39,3 +43,13 @@ class OwnerBroadcast(StatesGroup):
 
 class OwnerSetLink(StatesGroup):
     waiting_value = State()
+
+
+class SellerAddAccount(StatesGroup):
+    country = State()
+    age = State()
+    phone = State()
+    method = State()          # session | phone_code
+    session = State()
+    code = State()
+    password_2fa = State()

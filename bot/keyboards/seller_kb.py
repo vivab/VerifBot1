@@ -12,8 +12,10 @@ def new_order_keyboard(order_id: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def active_order_keyboard(order_id: int) -> InlineKeyboardMarkup:
+def active_order_keyboard(order_id: int, with_email_code: bool = False) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    if with_email_code:
+        builder.button(text="📩 Код из почты", callback_data=f"email_code:{order_id}")
     builder.button(text="Завершить заказ ✅", callback_data=f"complete_order:{order_id}")
     builder.button(text="Отказаться от заказа ❌", callback_data=f"cancel_taken:{order_id}")
     builder.adjust(1)

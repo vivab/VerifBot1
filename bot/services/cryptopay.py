@@ -27,12 +27,16 @@ class CryptoPayService:
 
     async def create_invoice(self, amount: float, description: str = "",
                              payload: str = "") -> dict:
+        """
+        Создаёт инвойс.
+        Возвращает dict с bot_invoice_url, invoice_id и т.д.
+        """
         invoice = await self.client.create_invoice(
             amount=amount,
             asset=USDT,
             description=description or f"Оплата {amount}$",
             payload=payload,
-            expires_in=3600,
+            expires_in=3600,  # 1 час
         )
         return {
             "invoice_id": invoice.invoice_id,
@@ -58,6 +62,10 @@ class CryptoPayService:
         return status == "paid"
 
     async def create_check(self, amount: float, asset: str = "USDT") -> dict:
+        """
+        Создаёт чек для вывода (авто-вывод).
+        """
+        # CryptoPay createCheck
         check = await self.client.create_check(
             asset=USDT,
             amount=amount,

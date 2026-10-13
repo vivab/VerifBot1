@@ -418,3 +418,69 @@ async def stats(callback: CallbackQuery):
 @router.callback_query(F.data.in_({"owner:buyer_prices", "owner:seller_prices"}))
 async def prices_stub(callback: CallbackQuery):
     await callback.answer("Цены меняются при редактировании позиций", show_alert=True)
+
+
+# ──────────────────── МАНУАЛЫ / TG OFFERS (расширение) ────────────────────
+
+@router.callback_query(F.data == "owner:add_manual")
+async def add_manual_hint(callback: CallbackQuery):
+    await callback.message.answer(
+        "📘 Добавление мануала — временно через команду:\n"
+        "<code>/add_manual Название|цена|текст мануала</code>\n\n"
+        "Пример:\n"
+        "<code>/add_manual Bybit KYC|5|1. Открой приложение...</code>",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.message(F.text.startswith("/add_manual "))
+async def cmd_add_manual(message: Message):
+    user = await db.get_user(message.from_user.id)
+    if not user or user.role.value not in ("admin", "owner"):
+        return
+    try:
+        payload = message.text[len("/add_manual "):]
+        name, price, *rest = payload.split("|")
+        text = "|".join(rest).strip()
+        mid = await db.add_manual(name.strip(), float(price.strip()), "text", content_text=text)
+        await message.answer(f"✅ Мануал #{mid} «{name.strip()}» добавлен за {price.strip()}$")
+    except Exception as e:
+        await message.answer(f"Ошибка формата: {e}")
+
+
+@router.message(F.text.startswith("/add_tg_offer "))
+async def cmd_add_tg_offer(message: Message):
+    user = await db.get_user(message.from_user.id)
+    if not user or user.role.value not in ("admin", "owner"):
+        return
+    # /add_tg_offer Китай|Новорег|10|6
+    try:
+        parts = message.text[len("/add_tg_offer "):].split("|")
+        country, age, buyer, seller = [p.strip() for p in parts[:4]]
+        oid = await db.add_tg_offer(country, age, float(buyer), float(seller))
+        await message.answer(f"✅ Оффер #{oid}: {country} / {age} — покуп {buyer}$ / прод {seller}$")
+    except Exception as e:
+        await message.answer(f"Формат: /add_tg_offer Страна|Возраст|цена_покуп|цена_прод\n{e}")
+
+
+@router.message(F.text.startswith("/add_tg_stock "))
+async def cmd_add_tg_stock(message: Message):
+    """Продавец/админ: /add_tg_stock Китай|Новорег|+7900...|session_string"""
+    user = await db.get_user(message.from_user.id)
+    if not user or user.role.value not in ("seller", "admin", "owner"):
+        return
+    try:
+        parts = message.text[len("/add_tg_stock "):].split("|")
+        country, age, phone, session = [p.strip() for p in parts[:4]]
+        from bot.services import telegram_client as tg
+        ok, msg = await tg.check_session_alive(session)
+        if not ok:
+            await message.answer(f"⚠️ Сессия не прошла проверку: {msg}\nВсё равно сохранить? Отправьте ещё раз с ! в начале session")
+            # всё равно можно сохранить — продавец отвечает
+        sid = await db.add_tg_stock(country, age, phone, session, "string", user.user_id)
+        await message.answer(f"✅ Аккаунт #{sid} добавлен в сток ({country} / {age})")
+    except Exception as e:
+        await message.answer(
+            f"Формат: /add_tg_stock Страна|Возраст|телефон|string_session\n{e}"
+        )

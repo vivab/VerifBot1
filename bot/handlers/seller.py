@@ -70,7 +70,7 @@ async def take_order(callback: CallbackQuery, bot: Bot):
         f"После выполнения нажмите «Завершить заказ»."
     )
 
-    await callback.message.edit_text(text, reply_markup=active_order_keyboard(order_id), parse_mode="HTML")
+    await callback.message.edit_text(text, reply_markup=active_order_keyboard(order_id, with_email_code=(order.entry_type == EntryType.EMAIL)), parse_mode="HTML")
     await callback.answer("Заказ принят!")
 
     # Уведомляем покупателя
@@ -110,7 +110,7 @@ async def view_order(callback: CallbackQuery):
         f"Оплата: <b>{order.seller_price}$</b>\n\n"
         f"<b>Данные:</b>\n{creds}"
     )
-    await callback.message.edit_text(text, reply_markup=active_order_keyboard(order.id), parse_mode="HTML")
+    await callback.message.edit_text(text, reply_markup=active_order_keyboard(order.id, with_email_code=(order.entry_type == EntryType.EMAIL)), parse_mode="HTML")
     await callback.answer()
 
 
@@ -176,3 +176,258 @@ async def cancel_taken_order(callback: CallbackQuery, bot: Bot):
 
     # Можно снова разослать продавцам, но для простоты оставляем как есть
     # (продавцы могут видеть в "Мои заказы" только свои)
+
+
+# ──────────────────── ЗАГРУЗКА TG-АККАУНТА ────────────────────
+
+from aiogram.fsm.context import FSMContext
+from bot.states.states import SellerAddAccount
+from bot.keyboards.user_kb import cancel_keyboard
+
+
+AGE_OPTIONS = [
+    "Новорег", "1 месяц", "3 месяца", "6 месяцев",
+    "1 год", "2 года", "3 года", "5 лет", "10 лет", "15 лет"
+]
+
+
+@router.message(F.text == "📦 Загрузить акк")
+async def upload_start(message: Message, state: FSMContext):
+    user = await db.get_user(message.from_user.id)
+    if not user or user.role not in (UserRole.SELLER, UserRole.ADMIN, UserRole.OWNER):
+        await message.answer("Только для продавцов.")
+        return
+    await state.set_state(SellerAddAccount.country)
+    await message.answer(
+        "📦 <b>Загрузка Telegram-аккаунта</b>\n\n"
+        "Введите <b>страну</b> (например: Китай, Индия, Бельгия):",
+        parse_mode="HTML",
+        reply_markup=cancel_keyboard()
+    )
+
+
+@router.message(SellerAddAccount.country)
+async def upload_country(message: Message, state: FSMContext):
+    country = message.text.strip()
+    if len(country) < 2:
+        await message.answer("Слишком коротко. Введите страну:")
+        return
+    await state.update_data(country=country)
+    await state.set_state(SellerAddAccount.age)
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    b = InlineKeyboardBuilder()
+    for a in AGE_OPTIONS:
+        b.button(text=a, callback_data=f"up_age:{a}")
+    b.button(text="❌ Отмена", callback_data="cancel")
+    b.adjust(2)
+    await message.answer(
+        f"Страна: <b>{country}</b>\n\nВыберите возраст аккаунта:",
+        reply_markup=b.as_markup(),
+        parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data.startswith("up_age:"), SellerAddAccount.age)
+async def upload_age(callback: CallbackQuery, state: FSMContext):
+    age = callback.data.split(":", 1)[1]
+    await state.update_data(age_label=age)
+    await state.set_state(SellerAddAccount.phone)
+    await callback.message.edit_text(
+        f"Возраст: <b>{age}</b>\n\nВведите номер телефона аккаунта:\n<code>+8613812345678</code>",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.message(SellerAddAccount.phone)
+async def upload_phone(message: Message, state: FSMContext):
+    phone = message.text.strip().replace(" ", "")
+    if not phone.startswith("+") or len(phone) < 10:
+        await message.answer("Формат: +79001234567")
+        return
+    await state.update_data(phone=phone)
+    await state.set_state(SellerAddAccount.method)
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    b = InlineKeyboardBuilder()
+    b.button(text="🔑 String Session", callback_data="up_method:session")
+    b.button(text="📱 Номер + код (войти сейчас)", callback_data="up_method:phone_code")
+    b.button(text="❌ Отмена", callback_data="cancel")
+    b.adjust(1)
+    await message.answer(
+        f"Номер: <code>{phone}</code>\n\nКак добавить аккаунт?",
+        reply_markup=b.as_markup(),
+        parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data.startswith("up_method:"), SellerAddAccount.method)
+async def upload_method(callback: CallbackQuery, state: FSMContext):
+    method = callback.data.split(":")[1]
+    await state.update_data(method=method)
+
+    if method == "session":
+        await state.set_state(SellerAddAccount.session)
+        await callback.message.edit_text(
+            "Отправьте <b>string session</b> аккаунта одним сообщением.\n\n"
+            "Её можно получить через Telethon / Pyrogram / готовые конвертеры tdata→session.",
+            parse_mode="HTML"
+        )
+    else:
+        data = await state.get_data()
+        from bot.services import telegram_client as tg
+        ok, msg = await tg.login_with_phone(data["phone"])
+        if not ok:
+            await callback.message.edit_text(
+                f"❌ Не удалось отправить код: {msg}\n\n"
+                "Проверьте TELEGRAM_API_ID/HASH на хосте или загрузите через String Session."
+            )
+            await state.clear()
+            await callback.answer()
+            return
+        await state.set_state(SellerAddAccount.code)
+        await callback.message.edit_text(
+            f"✅ Код отправлен на <code>{data['phone']}</code>\n\n"
+            "Введите код из Telegram/SMS:",
+            parse_mode="HTML"
+        )
+    await callback.answer()
+
+
+@router.message(SellerAddAccount.session)
+async def upload_session(message: Message, state: FSMContext):
+    session = message.text.strip()
+    data = await state.get_data()
+
+    from bot.services import telegram_client as tg
+    ok, msg = await tg.check_session_alive(session)
+    if not ok:
+        await message.answer(
+            f"⚠️ Сессия не прошла проверку: {msg}\n\n"
+            "Отправьте другую session или /cancel"
+        )
+        return
+
+    sid = await db.add_tg_stock(
+        country=data["country"],
+        age_label=data["age_label"],
+        phone=data["phone"],
+        session_string=session,
+        session_type="string",
+        seller_id=message.from_user.id,
+    )
+    await state.clear()
+    user = await db.get_user(message.from_user.id)
+    await message.answer(
+        f"✅ Аккаунт #{sid} добавлен!\n"
+        f"{data['country']} / {data['age_label']}\n"
+        f"Номер: <code>{data['phone']}</code>",
+        parse_mode="HTML",
+        reply_markup=main_menu(user.role)
+    )
+
+
+@router.message(SellerAddAccount.code)
+async def upload_code(message: Message, state: FSMContext):
+    code = message.text.strip()
+    data = await state.get_data()
+    from bot.services import telegram_client as tg
+
+    ok, msg, session = await tg.confirm_code(data["phone"], code)
+    if not ok:
+        if "пароль" in msg.lower() or "2fa" in msg.lower() or "password" in msg.lower():
+            await state.set_state(SellerAddAccount.password_2fa)
+            await state.update_data(code=code)
+            await message.answer("Нужен облачный пароль 2FA. Отправьте его:")
+            return
+        await message.answer(f"❌ {msg}\nПопробуйте код ещё раз или отмените.")
+        return
+
+    sid = await db.add_tg_stock(
+        country=data["country"],
+        age_label=data["age_label"],
+        phone=data["phone"],
+        session_string=session,
+        session_type="phone",
+        seller_id=message.from_user.id,
+    )
+    await state.clear()
+    await tg.disconnect_phone(data["phone"])
+    user = await db.get_user(message.from_user.id)
+    await message.answer(
+        f"✅ Аккаунт #{sid} добавлен и проверен!\n"
+        f"{data['country']} / {data['age_label']}\n"
+        f"Номер: <code>{data['phone']}</code>",
+        parse_mode="HTML",
+        reply_markup=main_menu(user.role)
+    )
+
+
+@router.message(SellerAddAccount.password_2fa)
+async def upload_2fa(message: Message, state: FSMContext):
+    password = message.text.strip()
+    data = await state.get_data()
+    from bot.services import telegram_client as tg
+
+    ok, msg, session = await tg.confirm_code(data["phone"], data.get("code", ""), password=password)
+    if not ok:
+        await message.answer(f"❌ {msg}")
+        return
+
+    sid = await db.add_tg_stock(
+        country=data["country"],
+        age_label=data["age_label"],
+        phone=data["phone"],
+        session_string=session,
+        session_type="phone",
+        seller_id=message.from_user.id,
+    )
+    await state.clear()
+    await tg.disconnect_phone(data["phone"])
+    user = await db.get_user(message.from_user.id)
+    await message.answer(
+        f"✅ Аккаунт #{sid} добавлен!\n"
+        f"{data['country']} / {data['age_label']}\n"
+        f"<code>{data['phone']}</code>",
+        parse_mode="HTML",
+        reply_markup=main_menu(user.role)
+    )
+
+
+@router.callback_query(F.data.startswith("email_code:"))
+async def email_code_handler(callback: CallbackQuery):
+    order_id = int(callback.data.split(":")[1])
+    order = await db.get_order(order_id)
+    if not order or order.seller_id != callback.from_user.id:
+        await callback.answer("Заказ не найден", show_alert=True)
+        return
+    if not order.entry_data:
+        await callback.answer("Данные уже удалены", show_alert=True)
+        return
+    import json
+    try:
+        data = json.loads(order.entry_data)
+    except Exception:
+        await callback.answer("Нет данных почты", show_alert=True)
+        return
+    email_addr = data.get("email")
+    password = data.get("password")
+    if not email_addr or not password:
+        await callback.answer("В заказе нет email/пароля", show_alert=True)
+        return
+
+    await callback.answer("Читаю почту...")
+    from bot.services.email_reader import fetch_latest_codes
+    ok, msg, codes = fetch_latest_codes(email_addr, password)
+    if not ok:
+        await callback.message.answer(f"❌ {msg}")
+        return
+    if codes:
+        codes_text = "\n".join(f"<code>{c}</code>" for c in codes[:5])
+        await callback.message.answer(
+            f"📩 Коды из почты (заказ #{order_id}):\n\n{codes_text}",
+            parse_mode="HTML"
+        )
+    else:
+        await callback.message.answer(f"ℹ️ {msg}")

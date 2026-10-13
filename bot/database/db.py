@@ -75,15 +75,72 @@ class Database:
                 invoice_id INTEGER PRIMARY KEY,
                 user_id INTEGER NOT NULL,
                 amount REAL NOT NULL,
-                purpose TEXT NOT NULL,  -- 'topup' Ð¸Ð»Ð¸ 'order:123'
+                purpose TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'active',
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS manuals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                buyer_price REAL NOT NULL,
+                delivery_type TEXT NOT NULL DEFAULT 'text',
+                content_text TEXT,
+                file_id TEXT,
+                is_active INTEGER NOT NULL DEFAULT 1
+            );
+
+            CREATE TABLE IF NOT EXISTS tg_offers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                country TEXT NOT NULL,
+                age_label TEXT NOT NULL,
+                buyer_price REAL NOT NULL,
+                seller_price REAL NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 1
+            );
+
+            CREATE TABLE IF NOT EXISTS tg_stock (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                country TEXT NOT NULL,
+                age_label TEXT NOT NULL,
+                phone TEXT NOT NULL,
+                session_string TEXT,
+                session_type TEXT NOT NULL DEFAULT 'string',
+                is_sold INTEGER NOT NULL DEFAULT 0,
+                seller_id INTEGER,
+                added_at TEXT NOT NULL
+            );
         """)
         await self.conn.commit()
+        # Миграции для старых БД
+        try:
+            await self.conn.execute("ALTER TABLE orders ADD COLUMN category TEXT DEFAULT 'verification'")
+            await self.conn.commit()
+        except Exception:
+            pass
+        try:
+            await self.conn.execute("ALTER TABLE orders ADD COLUMN stock_id INTEGER")
+            await self.conn.commit()
+        except Exception:
+            pass
+        try:
+            await self.conn.execute("ALTER TABLE orders ADD COLUMN phone TEXT")
+            await self.conn.commit()
+        except Exception:
+            pass
+        try:
+            await self.conn.execute("ALTER TABLE orders ADD COLUMN auto_complete_at TEXT")
+            await self.conn.commit()
+        except Exception:
+            pass
+        try:
+            await self.conn.execute("ALTER TABLE products ADD COLUMN category TEXT DEFAULT 'verification'")
+            await self.conn.commit()
+        except Exception:
+            pass
 
     async def _init_defaults(self):
-        # ÐÐµÑÐ¾Ð»ÑÐ½ÑÐµ Ð½Ð°ÑÑÑÐ¾Ð¹ÐºÐ¸
+        # Дефолтные настройки
         defaults = {
             "support_username": settings.SUPPORT_USERNAME,
             "channel_url": settings.CHANNEL_URL,
@@ -95,7 +152,7 @@ class Database:
             )
         await self.conn.commit()
 
-        # ÐÐ»Ð°Ð´ÐµÐ»ÐµÑ
+        # Владелец
         owner = await self.get_user(settings.OWNER_ID)
         if not owner:
             await self.add_user(
@@ -105,7 +162,7 @@ class Database:
                 role=UserRole.OWNER
             )
 
-    # ââââââââââââââââââââ USERS ââââââââââââââââââââ
+    # ──────────────────── USERS ────────────────────
 
     async def add_user(self, user_id: int, username: Optional[str], full_name: str,
                        role: UserRole = UserRole.USER) -> User:
@@ -209,7 +266,7 @@ class Database:
             row = await cursor.fetchone()
             return row[0]
 
-    # ââââââââââââââââââââ PRODUCTS ââââââââââââââââââââ
+    # ──────────────────── PRODUCTS ────────────────────
 
     async def add_product(self, name: str, buyer_price: float, seller_price: float,
                           entry_type: EntryType) -> int:
@@ -282,7 +339,7 @@ class Database:
         )
         await self.conn.commit()
 
-    # ââââââââââââââââââââ ORDERS ââââââââââââââââââââ
+    # ──────────────────── ORDERS ────────────────────
 
     async def create_order(self, buyer_id: int, product: Product,
                            entry_data: dict) -> int:
@@ -317,24 +374,44 @@ class Database:
             return self._row_to_order(row)
 
     def _row_to_order(self, row) -> Order:
+        keys = row.keys() if hasattr(row, "keys") else []
+        def g(k, default=None):
+            try:
+                return row[k] if k in keys else default
+            except Exception:
+                return default
+        et = g("entry_type") or "none"
+        try:
+            entry = EntryType(et)
+        except Exception:
+            entry = EntryType.NONE
+        st = g("status") or "pending"
+        try:
+            status = OrderStatus(st)
+        except Exception:
+            status = OrderStatus.PENDING
         return Order(
             id=row["id"],
             buyer_id=row["buyer_id"],
-            seller_id=row["seller_id"],
-            product_id=row["product_id"],
+            seller_id=g("seller_id"),
+            product_id=g("product_id"),
             product_name=row["product_name"],
             buyer_price=row["buyer_price"],
             seller_price=row["seller_price"],
-            entry_type=EntryType(row["entry_type"]),
-            status=OrderStatus(row["status"]),
-            entry_data=row["entry_data"],
+            entry_type=entry,
+            status=status,
+            entry_data=g("entry_data"),
+            category=g("category") or "verification",
+            stock_id=g("stock_id"),
+            phone=g("phone"),
             created_at=datetime.fromisoformat(row["created_at"]),
-            taken_at=datetime.fromisoformat(row["taken_at"]) if row["taken_at"] else None,
-            completed_at=datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None,
+            taken_at=datetime.fromisoformat(row["taken_at"]) if g("taken_at") else None,
+            completed_at=datetime.fromisoformat(row["completed_at"]) if g("completed_at") else None,
+            auto_complete_at=datetime.fromisoformat(row["auto_complete_at"]) if g("auto_complete_at") else None,
         )
 
     async def take_order(self, order_id: int, seller_id: int) -> bool:
-        """ÐÑÐ¾Ð¼Ð°ÑÐ½Ð¾ Ð±ÐµÑÑÑ Ð·Ð°ÐºÐ°Ð·. ÐÐ¾Ð·Ð²ÑÐ°ÑÐ°ÐµÑ True ÐµÑÐ»Ð¸ ÑÐ´Ð°Ð»Ð¾ÑÑ."""
+        """Атомарно берёт заказ. Возвращает True если удалось."""
         now = datetime.utcnow().isoformat()
         cursor = await self.conn.execute(
             """UPDATE orders 
@@ -346,7 +423,7 @@ class Database:
         return cursor.rowcount > 0
 
     async def complete_order(self, order_id: int):
-        """ÐÐ°Ð²ÐµÑÑÐ°ÐµÑ Ð·Ð°ÐºÐ°Ð· Ð¸ ÑÐ´Ð°Ð»ÑÐµÑ entry_data."""
+        """Завершает заказ и удаляет entry_data."""
         now = datetime.utcnow().isoformat()
         await self.conn.execute(
             """UPDATE orders 
@@ -406,7 +483,7 @@ class Database:
             return row[0]
 
     async def get_total_earnings(self) -> float:
-        """ÐÑÐ¸Ð±ÑÐ»Ñ Ð²Ð»Ð°Ð´ÐµÐ»ÑÑÐ° = ÑÑÐ¼Ð¼Ð° (buyer_price - seller_price) Ð¿Ð¾ Ð·Ð°Ð²ÐµÑÑÑÐ½Ð½ÑÐ¼"""
+        """Прибыль владельца = сумма (buyer_price - seller_price) по завершённым"""
         async with self.conn.execute(
             """SELECT COALESCE(SUM(buyer_price - seller_price), 0) 
                FROM orders WHERE status = ?""",
@@ -415,7 +492,7 @@ class Database:
             row = await cursor.fetchone()
             return row[0]
 
-    # ââââââââââââââââââââ SETTINGS ââââââââââââââââââââ
+    # ──────────────────── SETTINGS ────────────────────
 
     async def get_setting(self, key: str) -> Optional[str]:
         async with self.conn.execute(
@@ -431,7 +508,7 @@ class Database:
         )
         await self.conn.commit()
 
-    # ââââââââââââââââââââ INVOICES ââââââââââââââââââââ
+    # ──────────────────── INVOICES ────────────────────
 
     async def save_invoice(self, invoice_id: int, user_id: int, amount: float, purpose: str):
         now = datetime.utcnow().isoformat()
@@ -456,5 +533,142 @@ class Database:
         await self.conn.commit()
 
 
-# ÐÐ»Ð¾Ð±Ð°Ð»ÑÐ½ÑÐ¹ ÑÐºÐ·ÐµÐ¼Ð¿Ð»ÑÑ
+    # ──────────────────── MANUALS ────────────────────
+
+    async def add_manual(self, name: str, buyer_price: float, delivery_type: str,
+                         content_text: str = None, file_id: str = None) -> int:
+        cur = await self.conn.execute(
+            """INSERT INTO manuals (name, buyer_price, delivery_type, content_text, file_id)
+               VALUES (?, ?, ?, ?, ?)""",
+            (name, buyer_price, delivery_type, content_text, file_id)
+        )
+        await self.conn.commit()
+        return cur.lastrowid
+
+    async def get_manual(self, manual_id: int):
+        async with self.conn.execute("SELECT * FROM manuals WHERE id = ?", (manual_id,)) as c:
+            return await c.fetchone()
+
+    async def get_all_manuals(self, only_active: bool = True):
+        q = "SELECT * FROM manuals"
+        if only_active:
+            q += " WHERE is_active = 1"
+        q += " ORDER BY id"
+        async with self.conn.execute(q) as c:
+            return await c.fetchall()
+
+    async def delete_manual(self, manual_id: int):
+        await self.conn.execute("UPDATE manuals SET is_active = 0 WHERE id = ?", (manual_id,))
+        await self.conn.commit()
+
+    # ──────────────────── TG OFFERS / STOCK ────────────────────
+
+    async def add_tg_offer(self, country: str, age_label: str, buyer_price: float, seller_price: float) -> int:
+        cur = await self.conn.execute(
+            """INSERT INTO tg_offers (country, age_label, buyer_price, seller_price)
+               VALUES (?, ?, ?, ?)""",
+            (country, age_label, buyer_price, seller_price)
+        )
+        await self.conn.commit()
+        return cur.lastrowid
+
+    async def get_tg_countries(self):
+        async with self.conn.execute(
+            "SELECT DISTINCT country FROM tg_offers WHERE is_active = 1 ORDER BY country"
+        ) as c:
+            return [r["country"] for r in await c.fetchall()]
+
+    async def get_tg_offers_by_country(self, country: str):
+        async with self.conn.execute(
+            "SELECT * FROM tg_offers WHERE country = ? AND is_active = 1 ORDER BY id",
+            (country,)
+        ) as c:
+            return await c.fetchall()
+
+    async def get_tg_offer(self, offer_id: int):
+        async with self.conn.execute("SELECT * FROM tg_offers WHERE id = ?", (offer_id,)) as c:
+            return await c.fetchone()
+
+    async def count_tg_stock(self, country: str, age_label: str) -> int:
+        async with self.conn.execute(
+            "SELECT COUNT(*) FROM tg_stock WHERE country = ? AND age_label = ? AND is_sold = 0",
+            (country, age_label)
+        ) as c:
+            row = await c.fetchone()
+            return row[0]
+
+    async def take_tg_stock(self, country: str, age_label: str):
+        """Берёт один не проданный акк. Возвращает row или None."""
+        async with self.conn.execute(
+            """SELECT * FROM tg_stock
+               WHERE country = ? AND age_label = ? AND is_sold = 0
+               ORDER BY id LIMIT 1""",
+            (country, age_label)
+        ) as c:
+            row = await c.fetchone()
+        if not row:
+            return None
+        await self.conn.execute("UPDATE tg_stock SET is_sold = 1 WHERE id = ?", (row["id"],))
+        await self.conn.commit()
+        return row
+
+    async def add_tg_stock(self, country: str, age_label: str, phone: str,
+                           session_string: str = None, session_type: str = "string",
+                           seller_id: int = None) -> int:
+        now = datetime.utcnow().isoformat()
+        cur = await self.conn.execute(
+            """INSERT INTO tg_stock
+               (country, age_label, phone, session_string, session_type, seller_id, added_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (country, age_label, phone, session_string, session_type, seller_id, now)
+        )
+        await self.conn.commit()
+        return cur.lastrowid
+
+    async def get_tg_stock(self, stock_id: int):
+        async with self.conn.execute("SELECT * FROM tg_stock WHERE id = ?", (stock_id,)) as c:
+            return await c.fetchone()
+
+    async def create_tg_account_order(self, buyer_id: int, offer, stock, hours: int = 3) -> int:
+        from datetime import timedelta
+        now = datetime.utcnow()
+        auto_at = (now + timedelta(hours=hours)).isoformat()
+        cur = await self.conn.execute(
+            """INSERT INTO orders
+               (buyer_id, product_id, product_name, buyer_price, seller_price,
+                entry_type, status, category, stock_id, phone, created_at, auto_complete_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                buyer_id,
+                offer["id"],
+                f"TG {offer['country']} {offer['age_label']}",
+                offer["buyer_price"],
+                offer["seller_price"],
+                "none",
+                "awaiting_code",
+                "tg_account",
+                stock["id"],
+                stock["phone"],
+                now.isoformat(),
+                auto_at,
+            )
+        )
+        await self.conn.commit()
+        return cur.lastrowid
+
+    async def create_manual_order(self, buyer_id: int, manual) -> int:
+        now = datetime.utcnow().isoformat()
+        cur = await self.conn.execute(
+            """INSERT INTO orders
+               (buyer_id, product_id, product_name, buyer_price, seller_price,
+                entry_type, status, category, created_at, completed_at)
+               VALUES (?, ?, ?, ?, 0, 'none', 'completed', 'manual', ?, ?)""",
+            (buyer_id, manual["id"], manual["name"], manual["buyer_price"], now, now)
+        )
+        await self.conn.commit()
+        return cur.lastrowid
+
+
+
+# Глобальный экземпляр
 db = Database()

@@ -5,3 +5,5 @@ aiohttp==3.10.10
 pydantic==2.9.2
 pydantic-settings==2.6.0
 CryptoPayAPI==1.4.8
+telethon==1.36.0
+aiofiles==24.1.0

@@ -7,7 +7,7 @@ from bot.database.models import Product
 def owner_panel_keyboard(is_owner: bool = True) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
 
-    builder.button(text="➕ Добавить позицию", callback_data="owner:add_product")
+    builder.button(text="👥 Добавить верификацию", callback_data="owner:add_product")
     builder.button(text="🗑 Удалить позицию", callback_data="owner:delete_product")
     builder.button(text="✏️ Изменить позицию", callback_data="owner:edit_product")
 
@@ -19,7 +19,8 @@ def owner_panel_keyboard(is_owner: bool = True) -> InlineKeyboardMarkup:
     if is_owner:
         builder.button(text="🛡 Добавить админа", callback_data="owner:add_admin")
 
-    builder.button(text="📘 Мануалы (команды)", callback_data="owner:add_manual")
+    builder.button(text="📘 Добавить мануал", callback_data="owner:add_manual")
+    builder.button(text="📱 Добавить TG-позицию", callback_data="owner:add_tg_offer")
     builder.button(text="📢 Рассылка", callback_data="owner:broadcast")
     builder.button(text="🔗 Ссылка поддержки", callback_data="owner:support_link")
     builder.button(text="📡 Ссылка канала", callback_data="owner:channel_link")

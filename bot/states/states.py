@@ -53,3 +53,16 @@ class SellerAddAccount(StatesGroup):
     session = State()
     code = State()
     password_2fa = State()
+
+
+class OwnerAddManual(StatesGroup):
+    name = State()
+    price = State()
+    content = State()
+
+
+class OwnerAddTgOffer(StatesGroup):
+    country = State()
+    age = State()
+    buyer_price = State()
+    seller_price = State()

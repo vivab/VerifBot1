@@ -1,4 +1,6 @@
 from aiogram import Router, F, Bot
+from html import escape
+from math import isfinite
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 
@@ -11,7 +13,7 @@ from bot.keyboards.owner_kb import (
 from bot.keyboards.user_kb import main_menu
 from bot.states.states import (
     OwnerAddProduct, OwnerEditProduct, OwnerAddSeller, OwnerAddAdmin,
-    OwnerBroadcast, OwnerSetLink
+    OwnerBroadcast, OwnerSetLink, OwnerAddManual, OwnerAddTgOffer
 )
 from bot.config import settings
 
@@ -422,17 +424,87 @@ async def prices_stub(callback: CallbackQuery):
 
 # ──────────────────── МАНУАЛЫ / TG OFFERS (расширение) ────────────────────
 
+# ──────────────────── МАНУАЛЫ (владелец / админ) ────────────────────
+
 @router.callback_query(F.data == "owner:add_manual")
-async def add_manual_hint(callback: CallbackQuery):
-    await callback.message.answer(
-        "📘 Добавление мануала — временно через команду:\n"
-        "<code>/add_manual Название|цена|текст мануала</code>\n\n"
-        "Пример:\n"
-        "<code>/add_manual Bybit KYC|5|1. Открой приложение...</code>",
-        parse_mode="HTML"
+async def add_manual_start(callback: CallbackQuery, state: FSMContext):
+    user = await db.get_user(callback.from_user.id)
+    if not is_owner_or_admin(user):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.set_state(OwnerAddManual.name)
+    await callback.message.edit_text(
+        "📘 <b>Новый мануал</b>\n\nВведите название:",
+        reply_markup=cancel_to_panel()
     )
     await callback.answer()
 
+
+@router.message(OwnerAddManual.name)
+async def add_manual_name(message: Message, state: FSMContext):
+    name = (message.text or "").strip()
+    if not 2 <= len(name) <= 120:
+        await message.answer("Название должно содержать от 2 до 120 символов.")
+        return
+    await state.update_data(name=name)
+    await state.set_state(OwnerAddManual.price)
+    await message.answer("Укажите цену для покупателя в $ (например: 5):")
+
+
+@router.message(OwnerAddManual.price)
+async def add_manual_price(message: Message, state: FSMContext):
+    try:
+        price = float((message.text or "").replace(",", ".").strip())
+        if not isfinite(price) or price < 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("Введите корректную цену, например: 5 или 2.50")
+        return
+    await state.update_data(price=price)
+    await state.set_state(OwnerAddManual.content)
+    await message.answer(
+        "📄 Отправьте <b>.txt-файл</b> с мануалом или напишите текст одним сообщением.\n"
+        "Если отправите текст, покупатель тоже получит его в виде файла .txt.",
+        reply_markup=cancel_to_panel()
+    )
+
+
+@router.message(OwnerAddManual.content)
+async def add_manual_content(message: Message, state: FSMContext):
+    data = await state.get_data()
+    file_id = None
+    content_text = None
+    if message.document:
+        document = message.document
+        if not (document.file_name or "").lower().endswith(".txt"):
+            await message.answer("Пришлите файл с расширением .txt.")
+            return
+        if document.file_size and document.file_size > 2 * 1024 * 1024:
+            await message.answer("Файл слишком большой (максимум 2 МБ).")
+            return
+        file_id = document.file_id
+    elif message.text and not message.text.startswith("/"):
+        content_text = message.text.strip()
+        if not content_text:
+            await message.answer("Текст не должен быть пустым.")
+            return
+    else:
+        await message.answer("Отправьте .txt-документ или текст.")
+        return
+
+    mid = await db.add_manual(
+        data["name"], data["price"],
+        "file" if file_id else "text",
+        content_text=content_text,
+        file_id=file_id
+    )
+    await state.clear()
+    user = await db.get_user(message.from_user.id)
+    await message.answer(
+        f"✅ Мануал #{mid} «{escape(data['name'])}» добавлен!\n"
+        f"Цена: {data['price']}$\nВыдача: файл .txt",
+        reply_markup=owner_panel_keyboard(is_owner=is_owner(user))
+    )
 
 @router.message(F.text.startswith("/add_manual "))
 async def cmd_add_manual(message: Message):
@@ -447,6 +519,92 @@ async def cmd_add_manual(message: Message):
         await message.answer(f"✅ Мануал #{mid} «{name.strip()}» добавлен за {price.strip()}$")
     except Exception as e:
         await message.answer(f"Ошибка формата: {e}")
+
+
+# ──────────────────── TG-ПОЗИЦИИ (владелец / админ) ────────────────────
+
+@router.callback_query(F.data == "owner:add_tg_offer")
+async def add_tg_offer_start(callback: CallbackQuery, state: FSMContext):
+    user = await db.get_user(callback.from_user.id)
+    if not is_owner_or_admin(user):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.set_state(OwnerAddTgOffer.country)
+    await callback.message.edit_text(
+        "📱 <b>Новая Telegram-позиция</b>\n\n"
+        "Введите страну аккаунтов, например: Китай",
+        reply_markup=cancel_to_panel()
+    )
+    await callback.answer()
+
+
+@router.message(OwnerAddTgOffer.country)
+async def add_tg_offer_country(message: Message, state: FSMContext):
+    country = (message.text or "").strip()
+    if not 2 <= len(country) <= 50 or ":" in country:
+        await message.answer("Введите корректную страну (2–50 символов).")
+        return
+    await state.update_data(country=country)
+    await state.set_state(OwnerAddTgOffer.age)
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    b = InlineKeyboardBuilder()
+    for age in (
+        "Новорег", "1 месяц", "3 месяца", "6 месяцев", "1 год",
+        "2 года", "3 года", "5 лет", "10 лет", "15 лет"
+    ):
+        b.button(text=age, callback_data=f"owner:tg_age:{age}")
+    b.adjust(2)
+    await message.answer("Выберите возраст аккаунта:", reply_markup=b.as_markup())
+
+
+@router.callback_query(F.data.startswith("owner:tg_age:"), OwnerAddTgOffer.age)
+async def add_tg_offer_age(callback: CallbackQuery, state: FSMContext):
+    age = callback.data.split(":", 2)[2]
+    await state.update_data(age=age)
+    await state.set_state(OwnerAddTgOffer.buyer_price)
+    await callback.message.edit_text(
+        f"Возраст: <b>{escape(age)}</b>\n\nВведите цену покупателя ($):"
+    )
+    await callback.answer()
+
+
+@router.message(OwnerAddTgOffer.buyer_price)
+async def add_tg_offer_buyer_price(message: Message, state: FSMContext):
+    try:
+        price = float((message.text or "").replace(",", ".").strip())
+        if not isfinite(price) or price <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("Введите цену больше нуля, например: 10")
+        return
+    await state.update_data(buyer_price=price)
+    await state.set_state(OwnerAddTgOffer.seller_price)
+    await message.answer("Введите цену продавца ($), например: 6")
+
+
+@router.message(OwnerAddTgOffer.seller_price)
+async def add_tg_offer_seller_price(message: Message, state: FSMContext):
+    try:
+        price = float((message.text or "").replace(",", ".").strip())
+        if not isfinite(price) or price < 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("Введите корректную цену продавца, например: 6")
+        return
+    data = await state.get_data()
+    oid = await db.add_tg_offer(
+        data["country"], data["age"], data["buyer_price"], price
+    )
+    await state.clear()
+    user = await db.get_user(message.from_user.id)
+    await message.answer(
+        f"✅ Telegram-позиция #{oid} создана!\n"
+        f"Страна: {escape(data['country'])}\n"
+        f"Возраст: {escape(data['age'])}\n"
+        f"Покупатель: {data['buyer_price']}$ / продавец: {price}$\n\n"
+        "Чтобы добавить аккаунты в наличие, нажмите «📦 Загрузить акк» в главном меню.",
+        reply_markup=owner_panel_keyboard(is_owner=is_owner(user))
+    )
 
 
 @router.message(F.text.startswith("/add_tg_offer "))

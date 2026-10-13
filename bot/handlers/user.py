@@ -1,6 +1,6 @@
 import json
 from aiogram import Router, F, Bot
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, BufferedInputFile
 from aiogram.fsm.context import FSMContext
 
 from bot.database.db import db
@@ -98,27 +98,40 @@ async def buy_manual(callback: CallbackQuery):
     if not m or not m["is_active"]:
         await callback.answer("Недоступно", show_alert=True)
         return
-    user = await db.get_user(callback.from_user.id)
-    if user.balance < m["buyer_price"]:
-        await callback.answer(f"Недостаточно средств. Нужно {m['buyer_price']}$", show_alert=True)
+    if not m["file_id"] and not m["content_text"]:
+        await callback.answer("Мануал пока не загружен, обратитесь в поддержку.", show_alert=True)
         return
-    await db.update_balance(user.user_id, -m["buyer_price"])
-    await db.add_turnover(user.user_id, m["buyer_price"])
-    await db.create_manual_order(user.user_id, m)
 
-    await callback.message.edit_text(f"✅ Мануал <b>{m['name']}</b> куплен!", parse_mode="HTML")
-    if m["content_text"]:
-        await callback.message.answer(m["content_text"])
-    if m["file_id"]:
-        try:
+    price = m["buyer_price"]
+    charged = await db.debit_if_sufficient(callback.from_user.id, price)
+    if not charged:
+        await callback.answer("Недостаточно средств.", show_alert=True)
+        return
+
+    try:
+        if m["file_id"]:
             await callback.message.answer_document(m["file_id"])
-        except Exception:
-            try:
-                await callback.message.answer_photo(m["file_id"])
-            except Exception:
-                await callback.message.answer("(файл не удалось отправить, обратитесь в поддержку)")
-    await callback.answer()
+        else:
+            document = BufferedInputFile(
+                m["content_text"].encode("utf-8"),
+                filename=f"manual_{mid}.txt"
+            )
+            await callback.message.answer_document(document)
+    except Exception:
+        await db.update_balance(callback.from_user.id, price)
+        await callback.answer(
+            "Не удалось выдать файл. Сумма возвращена на баланс.",
+            show_alert=True
+        )
+        return
 
+    await db.add_turnover(callback.from_user.id, price)
+    await db.create_manual_order(callback.from_user.id, m)
+    await callback.answer("Мануал отправлен!")
+    try:
+        await callback.message.edit_text("✅ Мануал куплен и отправлен документом .txt.")
+    except Exception:
+        pass
 
 @router.callback_query(F.data == "cat:tg")
 async def cat_tg(callback: CallbackQuery):

@@ -211,6 +211,17 @@ class Database:
         )
         await self.conn.commit()
 
+    async def debit_if_sufficient(self, user_id: int, amount: float) -> bool:
+        """Списывает стоимость, только если баланс достаточен."""
+        if amount < 0:
+            return False
+        cursor = await self.conn.execute(
+            "UPDATE users SET balance = balance - ? WHERE user_id = ? AND balance >= ?",
+            (amount, user_id, amount)
+        )
+        await self.conn.commit()
+        return cursor.rowcount == 1
+
     async def set_balance(self, user_id: int, balance: float):
         await self.conn.execute(
             "UPDATE users SET balance = ? WHERE user_id = ?",

@@ -84,3 +84,26 @@ verification-bot/
 - На **тестовой сети** CryptoPay используй `@CryptoTestnetBot`
 - Для продакшена поставь `CRYPTOPAY_TESTNET=false` и токен от `@CryptoBot`
 - OWNER_ID задаётся в `.env` — этот пользователь автоматически получает роль владельца
+
+## BotHost: fix for python-telegram-bot not installed
+
+This project uses aiogram 3, not python-telegram-bot. BotHost generated builds may run
+`python -c 'import telegram'` during build even for aiogram bots.
+The compatibility dependency is included in `requirements.txt` for this check.
+
+- GitHub repository: `vivab/VerifBot1`, branch: `main`.
+- Entry point: `run.py`.
+- On BotHost press Update / Redeploy after changing the repository.
+- Set `BOT_TOKEN`, `OWNER_ID`, `CRYPTOPAY_TOKEN` in BotHost environment variables.
+- For Telegram client functionality also set `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`.
+- Keep secrets in hosting settings, not in GitHub.
+- Make sure BotHost persists `/app/data` so the SQLite database survives.
+
+If the automatically generated build still fails:
+1. In bot settings, open Additional settings.
+2. Enable Use custom Dockerfile.
+3. Save settings and Redeploy. The Dockerfile directly runs `python run.py`
+   and sets `DB_PATH=/app/data/bot.db`.
+
+If the build succeeds but the bot is offline, inspect runtime logs for
+network, config or database errors (these are independent of build errors).

@@ -20,11 +20,43 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+async def auto_complete_tg_orders(bot: Bot):
+    """Авто-завершение TG-аккаунт заказов по таймеру."""
+    import asyncio
+    from datetime import datetime
+    while True:
+        try:
+            await asyncio.sleep(60)
+            async with db.conn.execute(
+                """SELECT id, buyer_id FROM orders
+                   WHERE status = 'awaiting_code' AND auto_complete_at IS NOT NULL
+                   AND auto_complete_at <= ?""",
+                (datetime.utcnow().isoformat(),)
+            ) as cur:
+                rows = await cur.fetchall()
+            for row in rows:
+                await db.complete_order(row["id"])
+                try:
+                    await bot.send_message(
+                        row["buyer_id"],
+                        f"⏰ Заказ #{row['id']} автоматически завершён (истекло время)."
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.error(f"auto_complete error: {e}")
+
+
 async def on_startup(bot: Bot):
     await db.connect()
-    await cryptopay.start()
+    try:
+        await cryptopay.start()
+    except Exception as e:
+        logger.error(f"CryptoPay start failed: {e}")
     me = await bot.get_me()
     logger.info(f"Bot started: @{me.username}")
+    import asyncio
+    asyncio.create_task(auto_complete_tg_orders(bot))
 
 
 async def on_shutdown(bot: Bot):
@@ -40,7 +72,7 @@ async def main():
     )
     dp = Dispatcher(storage=MemoryStorage())
 
-    # Ð Ð¾ÑÑÐµÑÑ
+    # Роутеры
     dp.include_router(common.router)
     dp.include_router(user.router)
     dp.include_router(seller.router)
@@ -49,7 +81,7 @@ async def main():
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
 
-    # Ð£Ð´Ð°Ð»ÑÐµÐ¼ Ð²ÐµÐ±ÑÑÐº Ð½Ð° Ð²ÑÑÐºÐ¸Ð¹ ÑÐ»ÑÑÐ°Ð¹ (long polling)
+    # Удаляем вебхук на всякий случай (long polling)
     await bot.delete_webhook(drop_pending_updates=True)
 
     try:

@@ -4,6 +4,8 @@ from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery
 
 from bot.database.db import db
+from bot.i18n import menu_variants
+from bot.keyboards.chat_kb import chat_open_keyboard
 from bot.database.models import UserRole, OrderStatus, EntryType
 from bot.keyboards.seller_kb import active_order_keyboard, my_orders_keyboard
 from bot.keyboards.user_kb import main_menu, back_keyboard
@@ -19,7 +21,7 @@ def seller_filter(user_id_getter):
     return check
 
 
-@router.message(F.text == "📋 Мои заказы")
+@router.message(F.text.in_(menu_variants("orders")))
 async def my_orders(message: Message):
     user = await db.get_user(message.from_user.id)
     if not user or user.role not in (UserRole.SELLER, UserRole.ADMIN, UserRole.OWNER):
@@ -82,7 +84,8 @@ async def take_order(callback: CallbackQuery, bot: Bot):
         await bot.send_message(
             order.buyer_id,
             f"📦 Ваш заказ <b>#{order_id}</b> ({order.product_name}) взят в работу продавцом.",
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=chat_open_keyboard(order_id, await db.get_language(order.buyer_id))
         )
     except Exception:
         pass
@@ -201,7 +204,7 @@ AGE_OPTIONS = [
 ]
 
 
-@router.message(F.text == "📦 Загрузить акк")
+@router.message(F.text.in_(menu_variants("upload")))
 async def upload_start(message: Message, state: FSMContext):
     user = await db.get_user(message.from_user.id)
     if not user or user.role not in (UserRole.SELLER, UserRole.ADMIN, UserRole.OWNER):

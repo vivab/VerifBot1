@@ -122,3 +122,37 @@ network, config or database errors (these are independent of build errors).
   individually before manually adjusting balances.
 
 Automated tests: `python -m unittest discover -s tests -v`.
+
+## Anonymous customer–seller chat
+
+- Buyer and assigned seller can chat anonymously after a seller accepts a verification order.
+- Both parties get a **Chat** button for the order and **My chats** in the main menu.
+- Messages arrive as Telegram bot notifications even when neither participant has a chat open.
+- If delivery fails, the message is queued in SQLite and retried periodically (around 20 s).
+- Chat remains available after the order is completed. Cancelled or unassigned orders do not have access.
+- Only accepted verification order buyer/seller IDs are authorized; participants' Telegram usernames and IDs are not disclosed in chat notifications.
+- Successfully delivered messages are purged from SQLite; undelivered message text is kept until delivery.
+- Chat currently supports text only (max 1500 characters). Do not send passwords, one-time codes or Telegram sessions.
+
+## Language and automatic translation
+
+Choose **🌐 Language** from the menu or use `/language`.
+Supported: Russian (ru), English (en), German (de), Spanish (es), Turkish (tr).
+The main menu, chat labels and notifications are localized. Some older catalog and admin screens still use Russian.
+
+To enable message translation, configure a LibreTranslate-compatible HTTPS endpoint
+and optional key in BotHost environment variables:
+
+```env
+TRANSLATION_URL=https://libretranslate.com/translate
+TRANSLATION_API_KEY=YOUR_SECRET_API_KEY
+```
+
+A managed endpoint commonly requires an API key, whereas a self-hosted instance may not.
+The translated text is delivered in the recipient's selected language. If translation
+is unavailable or not configured, the original text is delivered with a clear notice.
+**Privacy:** translation may transmit message text to the chosen external translation
+provider; do not send account credentials, personal identity documents, or login codes.
+Do not put translation credentials in the GitHub repository.
+
+Tests: `python -m unittest discover -s tests -v`.

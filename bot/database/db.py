@@ -1,6 +1,6 @@
 import aiosqlite
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List
 from pathlib import Path
 
@@ -129,6 +129,32 @@ class Database:
             )
         """)
         await self.conn.commit()
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id INTEGER NOT NULL,
+                sender_id INTEGER NOT NULL,
+                receiver_id INTEGER NOT NULL,
+                body TEXT,
+                sender_language TEXT NOT NULL DEFAULT 'ru',
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                attempted_at TEXT,
+                created_at TEXT NOT NULL,
+                delivered_at TEXT
+            )
+        """)
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_pending "
+            "ON chat_messages(status, id)"
+        )
+        await self.conn.commit()
+        try:
+            await self.conn.execute("ALTER TABLE users ADD COLUMN language TEXT NOT NULL DEFAULT 'ru'")
+            await self.conn.commit()
+        except aiosqlite.OperationalError as error:
+            if "duplicate column" not in str(error).lower():
+                raise
         # Миграции для старых БД
         try:
             await self.conn.execute("ALTER TABLE orders ADD COLUMN category TEXT DEFAULT 'verification'")
@@ -178,6 +204,146 @@ class Database:
                 full_name="Owner",
                 role=UserRole.OWNER
             )
+
+    # ──────────────────── LANGUAGE AND ORDER CHAT ────────────────────
+
+    async def get_language(self, user_id: int) -> str:
+        async with self.conn.execute(
+            "SELECT language FROM users WHERE user_id = ?", (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        value = row["language"] if row else "ru"
+        return value if value in ("ru", "en", "de", "es", "tr") else "ru"
+
+    async def set_language(self, user_id: int, language: str) -> bool:
+        if language not in ("ru", "en", "de", "es", "tr"):
+            return False
+        result = await self.conn.execute(
+            "UPDATE users SET language = ? WHERE user_id = ?",
+            (language, user_id)
+        )
+        await self.conn.commit()
+        return result.rowcount == 1
+
+    async def chat_recipient(self, order_id: int, sender_id: int):
+        """Only actual buyer and assigned seller of accepted verification may chat."""
+        async with self.conn.execute(
+            """SELECT buyer_id, seller_id FROM orders WHERE id = ?
+               AND (category = 'verification' OR category IS NULL)
+               AND seller_id IS NOT NULL
+               AND status IN ('in_progress', 'completed')""", (order_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        if sender_id == row["buyer_id"]:
+            return row["seller_id"]
+        if sender_id == row["seller_id"]:
+            return row["buyer_id"]
+        return None
+
+    async def get_chat_orders(self, user_id: int, limit: int = 12):
+        async with self.conn.execute(
+            """SELECT id, product_name, status FROM orders
+               WHERE (buyer_id = ? OR seller_id = ?)
+               AND (category = 'verification' OR category IS NULL)
+               AND seller_id IS NOT NULL
+               AND status IN ('in_progress', 'completed')
+               ORDER BY id DESC LIMIT ?""", (user_id, user_id, limit)
+        ) as cur:
+            return await cur.fetchall()
+
+    async def queue_chat_message(self, order_id: int, sender_id: int,
+                                 body: str, sender_language: str):
+        """Atomic authorization and durable message queue; no profile identifiers sent."""
+        if not body or len(body) > 1500:
+            return None
+        async with aiosqlite.connect(self.db_path) as conn:
+            await conn.execute("PRAGMA busy_timeout=5000")
+            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                async with conn.execute(
+                    """SELECT buyer_id, seller_id FROM orders WHERE id = ?
+                       AND (category = 'verification' OR category IS NULL)
+                       AND seller_id IS NOT NULL
+                       AND status IN ('in_progress', 'completed')""",
+                    (order_id,)
+                ) as cur:
+                    row = await cur.fetchone()
+                if not row or sender_id not in row:
+                    await conn.rollback()
+                    return None
+                receiver = row[1] if sender_id == row[0] else row[0]
+                result = await conn.execute(
+                    """INSERT INTO chat_messages
+                       (order_id, sender_id, receiver_id, body,
+                        sender_language, status, created_at)
+                       VALUES (?, ?, ?, ?, ?, 'pending', ?)""",
+                    (order_id, sender_id, receiver, body, sender_language,
+                     datetime.utcnow().isoformat())
+                )
+                await conn.commit()
+                return result.lastrowid
+            except Exception:
+                await conn.rollback()
+                raise
+
+    async def get_undelivered_chat_ids(self, limit: int = 30):
+        async with self.conn.execute(
+            """SELECT id FROM chat_messages
+               WHERE status = 'pending' OR
+               (status = 'sending' AND attempted_at <= ?)
+               ORDER BY id LIMIT ?""",
+            ((datetime.utcnow() - timedelta(minutes=2)).isoformat(), limit)
+        ) as cur:
+            return [row["id"] for row in await cur.fetchall()]
+
+    async def claim_chat_message(self, message_id: int):
+        """Claim for delivery; two workers cannot send the same queued entry."""
+        now = datetime.utcnow().isoformat()
+        old = (datetime.utcnow() - timedelta(minutes=2)).isoformat()
+        async with aiosqlite.connect(self.db_path) as conn:
+            await conn.execute("PRAGMA busy_timeout=5000")
+            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                updated = await conn.execute(
+                    """UPDATE chat_messages
+                       SET status = 'sending', attempts = attempts + 1, attempted_at = ?
+                       WHERE id = ? AND (status = 'pending' OR
+                       (status = 'sending' AND attempted_at <= ?))""",
+                    (now, message_id, old)
+                )
+                if updated.rowcount != 1:
+                    await conn.rollback()
+                    return None
+                conn.row_factory = aiosqlite.Row
+                async with conn.execute(
+                    """SELECT id, order_id, sender_id, receiver_id, body,
+                       sender_language FROM chat_messages WHERE id = ?""",
+                    (message_id,)
+                ) as cur:
+                    row = await cur.fetchone()
+                await conn.commit()
+                return dict(row) if row else None
+            except Exception:
+                await conn.rollback()
+                raise
+
+    async def set_chat_delivery(self, message_id: int, delivered: bool):
+        """Do not retain delivered chat body in SQLite after Telegram receives it."""
+        if delivered:
+            await self.conn.execute(
+                """UPDATE chat_messages SET status = 'sent', body = NULL,
+                   delivered_at = ? WHERE id = ? AND status = 'sending'""",
+                (datetime.utcnow().isoformat(), message_id)
+            )
+        else:
+            await self.conn.execute(
+                """UPDATE chat_messages SET status = 'pending'
+                   WHERE id = ? AND status = 'sending'""",
+                (message_id,)
+            )
+        await self.conn.commit()
 
     # ──────────────────── USERS ────────────────────
 

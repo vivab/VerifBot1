@@ -2,23 +2,21 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeybo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot.database.models import Product, UserRole
+from bot.i18n import tr
 
 
-def main_menu(role: UserRole) -> ReplyKeyboardMarkup:
-    """Главное меню в зависимости от роли."""
+def main_menu(role: UserRole, lang: str = "ru") -> ReplyKeyboardMarkup:
+    def b(key):
+        return KeyboardButton(text=tr(lang, key))
     buttons = [
-        [KeyboardButton(text="🛍️ Каталог"), KeyboardButton(text="👤 Профиль")],
-        [KeyboardButton(text="🤑 Пополнить"), KeyboardButton(text="🎗️ Поддержка")],
-        [KeyboardButton(text="🛜 Наш канал")],
+        [b("catalog"), b("profile")],
+        [b("topup"), b("support")],
+        [b("channel"), b("chats"), b("language")],
     ]
-
     if role in (UserRole.SELLER, UserRole.ADMIN, UserRole.OWNER):
-        buttons.append([KeyboardButton(text="📋 Мои заказы"), KeyboardButton(text="📦 Загрузить акк")])
-
+        buttons.append([b("orders"), b("upload")])
     if role in (UserRole.ADMIN, UserRole.OWNER):
-        panel_text = "👑 Панель владельца" if role == UserRole.OWNER else "🛠 Админ-панель"
-        buttons.append([KeyboardButton(text=panel_text)])
-
+        buttons.append([b("owner" if role == UserRole.OWNER else "admin")])
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 
@@ -52,6 +50,8 @@ def profile_keyboard(has_balance: bool = False) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="💸 Вывод", callback_data="withdraw")
     builder.button(text="📦 Мои покупки", callback_data="my_purchases")
+    builder.button(text="💬 Мои чаты", callback_data="chat:list")
+    builder.button(text="🌐 Language / Язык", callback_data="language:menu")
     builder.button(text="◀️ Назад", callback_data="back_main")
     builder.adjust(1)
     return builder.as_markup()
@@ -84,10 +84,9 @@ def invoice_keyboard(invoice_id: int) -> InlineKeyboardMarkup:
 
 def verification_order_keyboard(order_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(
-        text="❌ Отменить заказ — вернуть средства",
-        callback_data=f"cancel_verification:{order_id}"
-    )
+    builder.button(text="❌ Отменить заказ — вернуть средства",
+                   callback_data=f"cancel_verification:{order_id}")
+    builder.button(text="💬 Чат по заказу", callback_data=f"chat:open:{order_id}")
     builder.button(text="📦 Мои покупки", callback_data="my_purchases")
     builder.adjust(1)
     return builder.as_markup()
@@ -100,6 +99,7 @@ def purchase_history_keyboard(pending_orders) -> InlineKeyboardMarkup:
             text=f"❌ Отменить заказ #{order.id}",
             callback_data=f"cancel_verification:{order.id}"
         )
+    builder.button(text="💬 Мои чаты", callback_data="chat:list")
     builder.button(text="◀️ Назад", callback_data="back_main")
     builder.adjust(1)
     return builder.as_markup()

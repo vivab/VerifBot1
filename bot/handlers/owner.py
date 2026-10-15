@@ -17,6 +17,7 @@ from bot.states.states import (
     OwnerBroadcast, OwnerSetLink, OwnerAddManual, OwnerAddTgOffer
 )
 from bot.config import settings
+from bot.i18n import menu_variants
 
 router = Router()
 
@@ -153,7 +154,7 @@ async def owner_remove_action(callback: CallbackQuery):
 
 # ──────────────────── ПАНЕЛЬ ────────────────────
 
-@router.message(F.text.in_({"👑 Панель владельца", "🛠 Админ-панель"}))
+@router.message(F.text.in_(menu_variants("owner") | menu_variants("admin")))
 async def open_panel(message: Message):
     user = await db.get_user(message.from_user.id)
     if not is_owner_or_admin(user):

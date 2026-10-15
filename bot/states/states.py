@@ -66,3 +66,7 @@ class OwnerAddTgOffer(StatesGroup):
     age = State()
     buyer_price = State()
     seller_price = State()
+
+
+class ChatStates(StatesGroup):
+    writing = State()

@@ -22,13 +22,14 @@ from bot.keyboards.seller_kb import new_order_keyboard
 from bot.states.states import TopUpStates, BuyStates, WithdrawStates
 from bot.services.cryptopay import cryptopay
 from bot.config import settings
+from bot.i18n import tr, menu_variants
 
 router = Router()
 
 
 # ──────────────────── КАТАЛОГ ────────────────────
 
-@router.message(F.text == "🛍️ Каталог")
+@router.message(F.text.in_(menu_variants("catalog")))
 async def catalog(message: Message):
     await message.answer(
         "🛍️ <b>Каталог</b>\n\nВыберите категорию:",
@@ -441,7 +442,7 @@ async def deprecated_legacy_checkout(message: Message, state: FSMContext):
 
 # ──────────────────── ПРОФИЛЬ ────────────────────
 
-@router.message(F.text == "👤 Профиль")
+@router.message(F.text.in_(menu_variants("profile")))
 async def profile(message: Message):
     user = await db.get_user(message.from_user.id)
     if not user:
@@ -535,7 +536,7 @@ async def withdraw_amount(message: Message, state: FSMContext):
 
 # ──────────────────── ПОПОЛНЕНИЕ ────────────────────
 
-@router.message(F.text == "🤑 Пополнить")
+@router.message(F.text.in_(menu_variants("topup")))
 async def topup(message: Message):
     await message.answer(
         "🤑 <b>Пополнение баланса</b>\n\nВыберите сумму или введите свою:",
@@ -694,7 +695,7 @@ async def deprecated_login_step(message: Message, state: FSMContext):
 
 # ──────────────────── ПОДДЕРЖКА / КАНАЛ ────────────────────
 
-@router.message(F.text == "🎗️ Поддержка")
+@router.message(F.text.in_(menu_variants("support")))
 async def support(message: Message):
     username = await db.get_setting("support_username") or settings.SUPPORT_USERNAME
     await message.answer(
@@ -703,7 +704,7 @@ async def support(message: Message):
     )
 
 
-@router.message(F.text == "🛜 Наш канал")
+@router.message(F.text.in_(menu_variants("channel")))
 async def channel(message: Message):
     url = await db.get_setting("channel_url") or settings.CHANNEL_URL
     await message.answer(

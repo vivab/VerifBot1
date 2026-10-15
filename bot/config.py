@@ -19,6 +19,10 @@ class Settings(BaseSettings):
 
     DB_PATH: str = "data/bot.db"
 
+    # LibreTranslate endpoint and optional managed-service API key.
+    TRANSLATION_URL: str = ""
+    TRANSLATION_API_KEY: str = ""
+
     # Авто-завершение заказа TG-аккаунта (часы)
     TG_ORDER_HOURS: int = 3
 

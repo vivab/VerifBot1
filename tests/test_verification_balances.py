@@ -9,6 +9,8 @@ os.environ.setdefault("CRYPTOPAY_TOKEN", "TEST_TOKEN")
 
 from bot.database.db import Database
 from bot.database.models import EntryType, OrderStatus
+from bot.services.cryptopay import _positive_amount, CryptoPayService
+from unittest.mock import AsyncMock
 
 
 class VerificationAccountingTests(unittest.IsolatedAsyncioTestCase):
@@ -87,6 +89,24 @@ class VerificationAccountingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(order_id)
         self.assertIn("Недостаточно", error)
         self.assertEqual((await self.db.get_user(self.buyer_id)).balance, 2)
+
+    async def test_paid_invoice_credited_once(self):
+        await self.db.save_invoice(1020304, self.buyer_id, 7, "topup")
+        self.assertEqual(await self.db.credit_paid_invoice_once(self.buyer_id, 1020304), 7)
+        self.assertIsNone(await self.db.credit_paid_invoice_once(self.buyer_id, 1020304))
+        self.assertEqual((await self.db.get_user(self.buyer_id)).balance, 32)
+
+    async def test_cryptopay_amount_and_invoice_mapping(self):
+        self.assertEqual(_positive_amount(2.5), "2.5")
+        with self.assertRaises(ValueError):
+            _positive_amount(float("nan"))
+        client = CryptoPayService()
+        client._request = AsyncMock(return_value=[
+            {"invoice_id": 1234, "status": "paid"},
+            {"invoice_id": 1235, "status": "active"}
+        ])
+        self.assertTrue(await client.check_invoice_paid(1234))
+        self.assertFalse(await client.check_invoice_paid(1235))
 
     async def test_cannot_refund_other_user_order(self):
         order_id, error = await self.db.create_paid_verification_order(

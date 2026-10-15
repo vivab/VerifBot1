@@ -642,10 +642,11 @@ async def check_payment(callback: CallbackQuery):
         await callback.answer("Оплата ещё не поступила. Подождите минуту и нажмите снова.", show_alert=True)
         return
 
-    # Зачисляем
-    amount = float(row["amount"])
-    await db.mark_invoice_paid(invoice_id)
-    await db.update_balance(callback.from_user.id, amount)
+    # Атомарное разовое зачисление: двойная кнопка не удвоит баланс.
+    amount = await db.credit_paid_invoice_once(callback.from_user.id, invoice_id)
+    if amount is None:
+        await callback.answer("Счёт уже зачислен или недоступен", show_alert=True)
+        return
 
     user = await db.get_user(callback.from_user.id)
     await callback.message.edit_text(

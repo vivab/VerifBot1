@@ -704,6 +704,43 @@ class Database:
         ) as cursor:
             return await cursor.fetchone()
 
+    async def credit_paid_invoice_once(self, user_id: int, invoice_id: int):
+        """Credit already-verified CryptoPay invoice at most once."""
+        async with aiosqlite.connect(self.db_path) as conn:
+            await conn.execute("PRAGMA busy_timeout=5000")
+            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                async with conn.execute(
+                    """SELECT amount FROM invoices WHERE invoice_id = ?
+                       AND user_id = ? AND status = 'active' AND purpose = 'topup'""",
+                    (invoice_id, user_id),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                if not row:
+                    await conn.rollback()
+                    return None
+                amount = float(row[0])
+                if not 0 < amount < 1000000:
+                    await conn.rollback()
+                    return None
+                cursor = await conn.execute(
+                    """UPDATE invoices SET status = 'paid'
+                       WHERE invoice_id = ? AND user_id = ? AND status = 'active'""",
+                    (invoice_id, user_id),
+                )
+                if cursor.rowcount != 1:
+                    await conn.rollback()
+                    return None
+                await conn.execute(
+                    "UPDATE users SET balance = balance + ? WHERE user_id = ?",
+                    (amount, user_id)
+                )
+                await conn.commit()
+                return amount
+            except Exception:
+                await conn.rollback()
+                raise
+
     async def mark_invoice_paid(self, invoice_id: int):
         await self.conn.execute(
             "UPDATE invoices SET status = 'paid' WHERE invoice_id = ?",

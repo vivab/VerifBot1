@@ -51,6 +51,7 @@ def confirm_buy_keyboard(product_id: int) -> InlineKeyboardMarkup:
 def profile_keyboard(has_balance: bool = False) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="💸 Вывод", callback_data="withdraw")
+    builder.button(text="📦 Мои покупки", callback_data="my_purchases")
     builder.button(text="◀️ Назад", callback_data="back_main")
     builder.adjust(1)
     return builder.as_markup()
@@ -76,6 +77,29 @@ def invoice_keyboard(invoice_id: int) -> InlineKeyboardMarkup:
     """Кнопка проверки оплаты после создания счёта."""
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Я оплатил — проверить", callback_data=f"check_pay:{invoice_id}")
+    builder.button(text="◀️ Назад", callback_data="back_main")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def verification_order_keyboard(order_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="❌ Отменить заказ — вернуть средства",
+        callback_data=f"cancel_verification:{order_id}"
+    )
+    builder.button(text="📦 Мои покупки", callback_data="my_purchases")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def purchase_history_keyboard(pending_orders) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for order in pending_orders:
+        builder.button(
+            text=f"❌ Отменить заказ #{order.id}",
+            callback_data=f"cancel_verification:{order.id}"
+        )
     builder.button(text="◀️ Назад", callback_data="back_main")
     builder.adjust(1)
     return builder.as_markup()

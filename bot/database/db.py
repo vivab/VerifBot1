@@ -112,6 +112,23 @@ class Database:
             );
         """)
         await self.conn.commit()
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS verification_checkouts (
+                checkout_key TEXT PRIMARY KEY,
+                buyer_id INTEGER NOT NULL,
+                order_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS verification_refunds (
+                order_id INTEGER PRIMARY KEY,
+                buyer_id INTEGER NOT NULL,
+                amount REAL NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        await self.conn.commit()
         # Миграции для старых БД
         try:
             await self.conn.execute("ALTER TABLE orders ADD COLUMN category TEXT DEFAULT 'verification'")
@@ -374,6 +391,157 @@ class Database:
         )
         await self.conn.commit()
         return cursor.lastrowid
+
+    async def create_paid_verification_order(
+        self, buyer_id: int, product_id: int, entry_data: dict, checkout_key: str
+    ):
+        """Charge and create order atomically. Repeated checkout never charges twice."""
+        if not checkout_key or len(checkout_key) > 128:
+            return None, "Некорректный идентификатор покупки."
+        now = datetime.utcnow().isoformat()
+        async with aiosqlite.connect(self.db_path) as conn:
+            await conn.execute("PRAGMA busy_timeout=5000")
+            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                async with conn.execute(
+                    "SELECT buyer_id, order_id FROM verification_checkouts WHERE checkout_key = ?",
+                    (checkout_key,),
+                ) as cur:
+                    previous = await cur.fetchone()
+                if previous:
+                    await conn.rollback()
+                    if previous[0] != buyer_id:
+                        return None, "Покупка принадлежит другому пользователю."
+                    return previous[1], None
+                async with conn.execute(
+                    """SELECT id, name, buyer_price, seller_price, entry_type
+                       FROM products WHERE id = ? AND is_active = 1""",
+                    (product_id,),
+                ) as cur:
+                    product = await cur.fetchone()
+                if not product:
+                    await conn.rollback()
+                    return None, "Позиция больше недоступна."
+                price = float(product[2])
+                if not 0 < price < 1000000:
+                    await conn.rollback()
+                    return None, "Некорректная цена позиции. Напишите в поддержку."
+                debit = await conn.execute(
+                    """UPDATE users SET balance = balance - ?,
+                       turnover = turnover + ?, verifications_bought = verifications_bought + 1
+                       WHERE user_id = ? AND balance >= ?""",
+                    (price, price, buyer_id, price),
+                )
+                if debit.rowcount != 1:
+                    await conn.rollback()
+                    return None, f"Недостаточно средств. Нужно {price:.2f}$."
+                result = await conn.execute(
+                    """INSERT INTO orders
+                       (buyer_id, product_id, product_name, buyer_price, seller_price,
+                        entry_type, status, entry_data, category, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'verification', ?)""",
+                    (
+                        buyer_id, product[0], product[1], price, product[3],
+                        product[4], OrderStatus.PENDING.value,
+                        json.dumps(entry_data, ensure_ascii=False), now
+                    ),
+                )
+                order_id = result.lastrowid
+                await conn.execute(
+                    """INSERT INTO verification_checkouts
+                       (checkout_key, buyer_id, order_id, created_at)
+                       VALUES (?, ?, ?, ?)""",
+                    (checkout_key, buyer_id, order_id, now),
+                )
+                await conn.commit()
+                return order_id, None
+            except Exception:
+                await conn.rollback()
+                raise
+
+    async def refund_pending_verification_order(self, buyer_id: int, order_id: int):
+        """Refund once, only before a seller accepts the verification."""
+        async with aiosqlite.connect(self.db_path) as conn:
+            await conn.execute("PRAGMA busy_timeout=5000")
+            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                async with conn.execute(
+                    """SELECT buyer_price FROM orders
+                       WHERE id = ? AND buyer_id = ?
+                         AND status = 'pending' AND seller_id IS NULL
+                         AND (category = 'verification' OR category IS NULL)""",
+                    (order_id, buyer_id),
+                ) as cur:
+                    row = await cur.fetchone()
+                if not row:
+                    await conn.rollback()
+                    return None
+                amount = float(row[0])
+                updated = await conn.execute(
+                    """UPDATE orders SET status = 'cancelled', entry_data = NULL
+                       WHERE id = ? AND buyer_id = ?
+                         AND status = 'pending' AND seller_id IS NULL
+                         AND (category = 'verification' OR category IS NULL)""",
+                    (order_id, buyer_id),
+                )
+                if updated.rowcount != 1:
+                    await conn.rollback()
+                    return None
+                await conn.execute(
+                    """UPDATE users SET balance = balance + ?,
+                       turnover = MAX(0, turnover - ?),
+                       verifications_bought = MAX(0, verifications_bought - 1)
+                       WHERE user_id = ?""",
+                    (amount, amount, buyer_id),
+                )
+                await conn.execute(
+                    """INSERT INTO verification_refunds
+                       (order_id, buyer_id, amount, created_at)
+                       VALUES (?, ?, ?, ?)""",
+                    (order_id, buyer_id, amount, datetime.utcnow().isoformat()),
+                )
+                await conn.commit()
+                return amount
+            except Exception:
+                await conn.rollback()
+                raise
+
+    async def complete_verification_and_pay_seller(self, order_id: int, seller_id: int):
+        """Order completion and seller payout in one transaction, once."""
+        async with aiosqlite.connect(self.db_path) as conn:
+            await conn.execute("PRAGMA busy_timeout=5000")
+            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                async with conn.execute(
+                    """SELECT seller_price FROM orders WHERE id = ?
+                       AND seller_id = ? AND status = 'in_progress'
+                       AND (category = 'verification' OR category IS NULL)""",
+                    (order_id, seller_id),
+                ) as cur:
+                    row = await cur.fetchone()
+                if not row:
+                    await conn.rollback()
+                    return None
+                updated = await conn.execute(
+                    """UPDATE orders SET status = 'completed', completed_at = ?,
+                       entry_data = NULL WHERE id = ? AND seller_id = ?
+                       AND status = 'in_progress'""",
+                    (datetime.utcnow().isoformat(), order_id, seller_id),
+                )
+                if updated.rowcount != 1:
+                    await conn.rollback()
+                    return None
+                amount = float(row[0])
+                await conn.execute(
+                    """UPDATE users SET balance = balance + ?, earned = earned + ?,
+                       verifications_done = verifications_done + 1
+                       WHERE user_id = ?""", (amount, amount, seller_id),
+                )
+                await conn.commit()
+                return amount
+            except Exception:
+                await conn.rollback()
+                raise
 
     async def get_order(self, order_id: int) -> Optional[Order]:
         async with self.conn.execute(

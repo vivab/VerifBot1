@@ -107,3 +107,18 @@ If the automatically generated build still fails:
 
 If the build succeeds but the bot is offline, inspect runtime logs for
 network, config or database errors (these are independent of build errors).
+
+## Verification payment and refund safety
+
+- Contact details collection does not debit the buyer.
+- Checkout and order creation use one database transaction and an idempotency key.
+- Buyers can cancel pending verification orders for a one-time full balance refund.
+- Accepted orders require support review for a refund.
+- A seller can only receive one payout for any completed verification order.
+- Verification orders do not ask for login codes, passwords or Telegram sessions.
+  The customer completes their own authorization in the provider app.
+- Older abandoned checkouts may have lost balances without linked orders.
+  Since the prior bot did not keep charge records, verify those claims
+  individually before manually adjusting balances.
+
+Automated tests: `python -m unittest discover -s tests -v`.

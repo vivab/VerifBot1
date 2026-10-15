@@ -1,4 +1,5 @@
 import json
+from html import escape
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery
 
@@ -58,19 +59,22 @@ async def take_order(callback: CallbackQuery, bot: Bot):
     entry = json.loads(order.entry_data) if order.entry_data else {}
 
     if order.entry_type == EntryType.EMAIL:
-        creds = f"📧 Email: <code>{entry.get('email')}</code>\n🔑 Пароль: <code>{entry.get('password')}</code>"
+        contact = escape(str(entry.get("email") or "Не указан"))
+        creds = f"📧 Контактный email: <code>{contact}</code>"
     else:
-        creds = f"📱 Телефон: <code>{entry.get('phone')}</code>\n🔢 Код: <code>{entry.get('code')}</code>"
+        contact = escape(str(entry.get("contact") or entry.get("phone") or "Не указан"))
+        creds = f"📱 Telegram-контакт: <code>{contact}</code>"
+    creds += "\n🔐 Покупатель самостоятельно вводит коды и пароли."
 
     text = (
         f"✅ Вы взяли заказ <b>#{order_id}</b>\n\n"
         f"Сервис: <b>{order.product_name}</b>\n"
         f"Оплата: <b>{order.seller_price}$</b>\n\n"
-        f"<b>Данные для входа:</b>\n{creds}\n\n"
+        f"<b>Контакт по заказу:</b>\n{creds}\n\n"
         f"После выполнения нажмите «Завершить заказ»."
     )
 
-    await callback.message.edit_text(text, reply_markup=active_order_keyboard(order_id, with_email_code=(order.entry_type == EntryType.EMAIL)), parse_mode="HTML")
+    await callback.message.edit_text(text, reply_markup=active_order_keyboard(order_id, with_email_code=False), parse_mode="HTML")
     await callback.answer("Заказ принят!")
 
     # Уведомляем покупателя
@@ -100,17 +104,20 @@ async def view_order(callback: CallbackQuery):
 
     entry = json.loads(order.entry_data) if order.entry_data else {}
     if order.entry_type == EntryType.EMAIL:
-        creds = f"📧 Email: <code>{entry.get('email')}</code>\n🔑 Пароль: <code>{entry.get('password')}</code>"
+        contact = escape(str(entry.get("email") or "Не указан"))
+        creds = f"📧 Контактный email: <code>{contact}</code>"
     else:
-        creds = f"📱 Телефон: <code>{entry.get('phone')}</code>\n🔢 Код: <code>{entry.get('code')}</code>"
+        contact = escape(str(entry.get("contact") or entry.get("phone") or "Не указан"))
+        creds = f"📱 Telegram-контакт: <code>{contact}</code>"
+    creds += "\n🔐 Покупатель самостоятельно вводит коды и пароли."
 
     text = (
         f"📦 Заказ <b>#{order.id}</b>\n\n"
         f"Сервис: <b>{order.product_name}</b>\n"
         f"Оплата: <b>{order.seller_price}$</b>\n\n"
-        f"<b>Данные:</b>\n{creds}"
+        f"<b>Контакт по заказу:</b>\n{creds}"
     )
-    await callback.message.edit_text(text, reply_markup=active_order_keyboard(order.id, with_email_code=(order.entry_type == EntryType.EMAIL)), parse_mode="HTML")
+    await callback.message.edit_text(text, reply_markup=active_order_keyboard(order.id, with_email_code=False), parse_mode="HTML")
     await callback.answer()
 
 
@@ -127,16 +134,15 @@ async def complete_order(callback: CallbackQuery, bot: Bot):
         await callback.answer("Заказ уже завершён или отменён", show_alert=True)
         return
 
-    # Завершаем (удаляет entry_data)
-    await db.complete_order(order_id)
-
-    # Начисляем продавцу
-    await db.update_balance(order.seller_id, order.seller_price)
-    await db.add_seller_stats(order.seller_id, order.seller_price)
+    # Статус и начисление одной транзакцией: повторное нажатие безопасно.
+    payout = await db.complete_verification_and_pay_seller(order_id, order.seller_id)
+    if payout is None:
+        await callback.answer("Заказ уже завершён или изменён", show_alert=True)
+        return
 
     await callback.message.edit_text(
         f"✅ Заказ <b>#{order_id}</b> завершён!\n"
-        f"Вам начислено <b>{order.seller_price}$</b>",
+        f"Вам начислено <b>{payout:.2f}$</b>",
         parse_mode="HTML"
     )
     await callback.answer("Заказ завершён!")
@@ -161,17 +167,21 @@ async def cancel_taken_order(callback: CallbackQuery, bot: Bot):
         await callback.answer("Заказ не найден", show_alert=True)
         return
 
-    # Возвращаем заказ в pending (можно снова брать)
-    # Но данные уже есть, просто сбрасываем seller
-    from datetime import datetime
-    await db.conn.execute(
+    # Отказ только от действительно активного заказа; завершённый не открыть вновь.
+    cursor = await db.conn.execute(
         """UPDATE orders SET seller_id = NULL, status = ?, taken_at = NULL
-           WHERE id = ?""",
-        (OrderStatus.PENDING.value, order_id)
+           WHERE id = ? AND seller_id = ? AND status = ?""",
+        (OrderStatus.PENDING.value, order_id, callback.from_user.id,
+         OrderStatus.IN_PROGRESS.value)
     )
     await db.conn.commit()
+    if cursor.rowcount != 1:
+        await callback.answer("Заказ уже изменился", show_alert=True)
+        return
 
-    await callback.message.edit_text(f"❌ Вы отказались от заказа #{order_id}. Он снова доступен другим продавцам.")
+    await callback.message.edit_text(
+        f"❌ Вы отказались от заказа #{order_id}. Покупатель может отменить его с возвратом."
+    )
     await callback.answer()
 
     # Можно снова разослать продавцам, но для простоты оставляем как есть
@@ -397,37 +407,8 @@ async def upload_2fa(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("email_code:"))
 async def email_code_handler(callback: CallbackQuery):
-    order_id = int(callback.data.split(":")[1])
-    order = await db.get_order(order_id)
-    if not order or order.seller_id != callback.from_user.id:
-        await callback.answer("Заказ не найден", show_alert=True)
-        return
-    if not order.entry_data:
-        await callback.answer("Данные уже удалены", show_alert=True)
-        return
-    import json
-    try:
-        data = json.loads(order.entry_data)
-    except Exception:
-        await callback.answer("Нет данных почты", show_alert=True)
-        return
-    email_addr = data.get("email")
-    password = data.get("password")
-    if not email_addr or not password:
-        await callback.answer("В заказе нет email/пароля", show_alert=True)
-        return
-
-    await callback.answer("Читаю почту...")
-    from bot.services.email_reader import fetch_latest_codes
-    ok, msg, codes = fetch_latest_codes(email_addr, password)
-    if not ok:
-        await callback.message.answer(f"❌ {msg}")
-        return
-    if codes:
-        codes_text = "\n".join(f"<code>{c}</code>" for c in codes[:5])
-        await callback.message.answer(
-            f"📩 Коды из почты (заказ #{order_id}):\n\n{codes_text}",
-            parse_mode="HTML"
-        )
-    else:
-        await callback.message.answer(f"ℹ️ {msg}")
+    # Legacy buttons must not retrieve or forward authentication codes.
+    await callback.answer(
+        "Передача кодов входа отключена. Покупатель вводит их самостоятельно.",
+        show_alert=True,
+    )

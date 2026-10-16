@@ -68,5 +68,9 @@ class OwnerAddTgOffer(StatesGroup):
     seller_price = State()
 
 
+class OwnerSticker(StatesGroup):
+    waiting = State()
+
+
 class ChatStates(StatesGroup):
     writing = State()

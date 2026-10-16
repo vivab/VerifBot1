@@ -14,7 +14,7 @@ from bot.keyboards.owner_kb import (
 from bot.keyboards.user_kb import main_menu
 from bot.states.states import (
     OwnerAddProduct, OwnerEditProduct, OwnerAddSeller, OwnerAddAdmin,
-    OwnerBroadcast, OwnerSetLink, OwnerAddManual, OwnerAddTgOffer
+    OwnerBroadcast, OwnerSetLink, OwnerAddManual, OwnerAddTgOffer, OwnerSticker
 )
 from bot.config import settings
 from bot.i18n import menu_variants
@@ -34,7 +34,7 @@ def is_owner(user) -> bool:
 
 # ──────────────────── УДАЛЕНИЕ МАНУАЛОВ / TG-АККАУНТОВ / TG-ПОЗИЦИЙ ────────────────────
 
-_DELETE_PAGE_SIZE = 8
+_DELETE_PAGE_SIZE = 5
 _DELETE_KINDS = {
     "manual": "📘 Мануалы",
     "tg_stock": "📦 Непроданные Telegram-аккаунты",
@@ -240,18 +240,67 @@ async def add_product_entry(callback: CallbackQuery, state: FSMContext):
         entry_type=entry_type
     )
 
-    await state.clear()
+    await state.update_data(sticker_kind="verification", sticker_id=product_id)
+    await state.set_state(OwnerSticker.waiting)
     await callback.message.edit_text(
         f"✅ Позиция добавлена!\n\n"
         f"ID: {product_id}\n"
         f"Название: {data['name']}\n"
         f"Покупатель: {data['buyer_price']}$\n"
         f"Продавец: {data['seller_price']}$\n"
-        f"Вход: {'Почта' if entry_type == EntryType.EMAIL else 'Telegram'}",
-        reply_markup=owner_panel_keyboard(is_owner=is_owner(await db.get_user(callback.from_user.id)))
+        f"Вход: {'Почта' if entry_type == EntryType.EMAIL else 'Telegram'}\n\n"
+        "🎨 Теперь отправьте стикер для позиции (обычный, анимированный или Premium). "
+        "Вводить ID не нужно. Для пропуска отправьте /skip.",
+        reply_markup=cancel_to_panel()
     )
     await callback.answer()
 
+
+
+@router.message(OwnerSticker.waiting)
+async def save_catalog_sticker(message: Message, state: FSMContext):
+    user = await db.get_user(message.from_user.id)
+    if not is_owner_or_admin(user):
+        await state.clear()
+        return
+    data = await state.get_data()
+    kind, item_id = data.get("sticker_kind"), data.get("sticker_id")
+    if not kind or not item_id:
+        await state.clear()
+        await message.answer("Не удалось определить позицию.")
+        return
+    if message.text and message.text.strip().lower() in ("/skip", "пропустить", "skip"):
+        await state.clear()
+        await message.answer("✅ Товар сохранён без стикера.",
+                             reply_markup=owner_panel_keyboard(is_owner=is_owner(user)))
+        return
+    if not message.sticker:
+        await message.answer("Пришлите Telegram-стикер (не файл и не ID) или /skip.")
+        return
+    result = await db.set_item_sticker(kind, item_id, message.sticker.file_id)
+    await state.clear()
+    await message.answer(
+        "✅ Стикер сохранён!" if result else "⚠️ Стикер не сохранился.",
+        reply_markup=owner_panel_keyboard(is_owner=is_owner(user))
+    )
+
+
+@router.callback_query(F.data.startswith("owner:delete_page:"))
+@router.callback_query(F.data.startswith("owner:edit_page:"))
+async def product_page(callback: CallbackQuery):
+    user = await db.get_user(callback.from_user.id)
+    if not is_owner_or_admin(user):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    _, action, number = callback.data.split(":")
+    action = action.removesuffix("_page")
+    page = max(0, min(10000, int(number)))
+    products = await db.get_all_products(only_active=(action == "edit"))
+    await callback.message.edit_text(
+        f"📋 Страница {page + 1}",
+        reply_markup=products_list_keyboard(products, action, page)
+    )
+    await callback.answer()
 
 # ──────────────────── УДАЛИТЬ / ИЗМЕНИТЬ ────────────────────
 
@@ -622,12 +671,14 @@ async def add_manual_content(message: Message, state: FSMContext):
         content_text=content_text,
         file_id=file_id
     )
-    await state.clear()
+    await state.update_data(sticker_kind="manual", sticker_id=mid)
+    await state.set_state(OwnerSticker.waiting)
     user = await db.get_user(message.from_user.id)
     await message.answer(
         f"✅ Мануал #{mid} «{escape(data['name'])}» добавлен!\n"
-        f"Цена: {data['price']}$\nВыдача: файл .txt",
-        reply_markup=owner_panel_keyboard(is_owner=is_owner(user))
+        f"Цена: {data['price']}$\nВыдача: файл .txt\n\n"
+        "🎨 Отправьте стикер или /skip для пропуска.",
+        reply_markup=cancel_to_panel()
     )
 
 @router.message(F.text.startswith("/add_manual "))
@@ -719,15 +770,17 @@ async def add_tg_offer_seller_price(message: Message, state: FSMContext):
     oid = await db.add_tg_offer(
         data["country"], data["age"], data["buyer_price"], price
     )
-    await state.clear()
+    await state.update_data(sticker_kind="tg_offer", sticker_id=oid)
+    await state.set_state(OwnerSticker.waiting)
     user = await db.get_user(message.from_user.id)
     await message.answer(
         f"✅ Telegram-позиция #{oid} создана!\n"
         f"Страна: {escape(data['country'])}\n"
         f"Возраст: {escape(data['age'])}\n"
         f"Покупатель: {data['buyer_price']}$ / продавец: {price}$\n\n"
-        "Чтобы добавить аккаунты в наличие, нажмите «📦 Загрузить акк» в главном меню.",
-        reply_markup=owner_panel_keyboard(is_owner=is_owner(user))
+        "Чтобы добавить аккаунты в наличие, нажмите «📦 Загрузить акк» в главном меню.\n\n"
+        "🎨 Отправьте стикер для позиции или /skip.",
+        reply_markup=cancel_to_panel()
     )
 
 

@@ -128,16 +128,19 @@ async def chat_list(message: Message, state: FSMContext):
                          reply_markup=chat_orders_keyboard(orders, lang))
 
 
-@router.callback_query(F.data == "chat:list")
+@router.callback_query(F.data.startswith("chat:list"))
 async def chat_list_callback(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     lang = await db.get_language(callback.from_user.id)
     orders = await db.get_chat_orders(callback.from_user.id)
+    page = int(callback.data.rsplit(":", 1)[1]) if callback.data.startswith("chat:list:") else 0
+    page = max(0, min(page, 10000))
     if not orders:
         await callback.message.answer(tr(lang, "chat_empty"))
     else:
-        await callback.message.answer(tr(lang, "chat_list"),
-                                      reply_markup=chat_orders_keyboard(orders, lang))
+        await callback.message.edit_text(
+            tr(lang, "chat_list") + f"\nСтраница {page + 1}",
+            reply_markup=chat_orders_keyboard(orders, lang, page))
     await callback.answer()
 
 
@@ -187,8 +190,7 @@ async def chat_send(message: Message, state: FSMContext, bot: Bot):
         order_id, message.from_user.id, body, lang
     )
     if not message_id:
-        await state.clear()
-        await message.answer(tr(lang, "chat_not_allowed"))
+        await message.answer("⏳ Продавец может ответить только после первого сообщения покупателя.")
         return
     delivered = await _deliver_message(bot, message_id)
     await message.answer(tr(lang, "chat_sent" if delivered else "chat_queued"))

@@ -3,6 +3,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot.database.models import Product, UserRole
 from bot.i18n import tr
+from bot.keyboards.pagination import page_slice, add_page_arrows
 
 
 def main_menu(role: UserRole, lang: str = "ru") -> ReplyKeyboardMarkup:
@@ -20,16 +21,15 @@ def main_menu(role: UserRole, lang: str = "ru") -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 
-def catalog_keyboard(products: list[Product]) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    for p in products:
-        builder.button(
-            text=f"{p.name} — {p.buyer_price}$",
-            callback_data=f"buy:{p.id}"
-        )
-    builder.button(text="◀️ Назад", callback_data="back_main")
-    builder.adjust(1)
-    return builder.as_markup()
+def catalog_keyboard(products: list[Product], page: int = 0) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    chunk, page, previous, following = page_slice(products, page)
+    for p in chunk:
+        b.button(text=f"{p.name} — {p.buyer_price}$"[:60], callback_data=f"buy:{p.id}")
+    add_page_arrows(b, page, previous, following, "catvpage")
+    b.button(text="◀️ Назад", callback_data="catalog")
+    b.adjust(1)
+    return b.as_markup()
 
 
 def back_keyboard(callback: str = "back_main") -> InlineKeyboardMarkup:

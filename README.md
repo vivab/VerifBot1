@@ -156,3 +156,29 @@ provider; do not send account credentials, personal identity documents, or login
 Do not put translation credentials in the GitHub repository.
 
 Tests: `python -m unittest discover -s tests -v`.
+
+## Store upgrade (five items per page, optional stickers, payouts)
+
+- Lists of verification offers, manuals, countries, Telegram offers, seller orders, owner
+  offer edit/delete, and order chats use pages of up to five item slots with arrow buttons.
+- Owner/admin creates a verification, manual or Telegram offer, then sends an actual
+  Telegram sticker to the bot; no manual file ID is required. Send `/skip` for no sticker.
+  The sticker is displayed as a separate Telegram message on the item's detail page.
+- The sticker Bot API handles normal/animated/video sticker IDs. Telegram Premium
+  visual effects are not guaranteed for messages sent by a bot; owner Premium status
+  does not give the bot a personal Premium subscription.
+- Balances represent USDT in the application. Top-ups require verified CryptoPay invoice
+  and are credited exactly once; manual and Telegram-offer purchases debit atomically.
+- A purchased text manual can be re-requested without another charge by clicking Buy again.
+- Crypto Bot payouts are available from the profile to every role. They use Crypto Pay
+  `transfer` with a unique `spend_id`, paid to the same Telegram user who owns the balance.
+  Crypto Bot must have been started by the recipient. The app must enable transfers
+  in Crypto Bot -> Crypto Pay -> My Apps -> Security -> Transfers.
+- A failed/uncertain payout reserves the amount and flags it for reconciliation; it
+  **does not** automatically refund and retry as a new transfer, which could pay twice.
+- Seller cannot send first in an old/completed verification chat; the buyer starts and
+  the seller can reply. Chat messages are durable while the seller is away.
+
+Set the usual hosting environment variables, and deploy from branch `main`.
+Keep the SQLite data directory mounted and persistent on BotHost. Test withdrawals
+using a funded testnet app and own Telegram accounts before enabling real payouts.

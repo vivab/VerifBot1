@@ -2,6 +2,7 @@ from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot.database.models import Product
+from bot.keyboards.pagination import page_slice, add_page_arrows
 
 
 def owner_panel_keyboard(is_owner: bool = True) -> InlineKeyboardMarkup:
@@ -35,15 +36,14 @@ def owner_panel_keyboard(is_owner: bool = True) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def products_list_keyboard(products: list[Product], action: str) -> InlineKeyboardMarkup:
-    """action = delete / edit / view"""
+def products_list_keyboard(products: list[Product], action: str, page: int = 0) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    for p in products:
+    chunk, page, previous, following = page_slice(products, page)
+    for p in chunk:
         status = "✅" if p.is_active else "❌"
-        builder.button(
-            text=f"{status} {p.name} (покуп: {p.buyer_price}$ / прод: {p.seller_price}$)",
-            callback_data=f"owner:{action}:{p.id}"
-        )
+        builder.button(text=f"{status} {p.name} ({p.buyer_price}$ / {p.seller_price}$)"[:60],
+                       callback_data=f"owner:{action}:{p.id}")
+    add_page_arrows(builder, page, previous, following, f"owner:{action}_page")
     builder.button(text="◀️ Назад", callback_data="owner:panel")
     builder.adjust(1)
     return builder.as_markup()
@@ -75,7 +75,7 @@ def cancel_to_panel() -> InlineKeyboardMarkup:
 def catalog_delete_list_keyboard(rows, kind: str, page: int, more: bool) -> InlineKeyboardMarkup:
     """Show only unsold/active items. Never display Telegram sessions."""
     builder = InlineKeyboardBuilder()
-    for row in rows:
+    for row in rows[:5]:
         if kind == "manual":
             label = f"📘 #{row['id']} {row['name']} — {row['buyer_price']}$"
         elif kind == "tg_offer":

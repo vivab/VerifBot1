@@ -155,6 +155,42 @@ class Database:
         except aiosqlite.OperationalError as error:
             if "duplicate column" not in str(error).lower():
                 raise
+        # Presentation assets, unique purchases, and payout ledger.
+        for table_name in ("products", "manuals", "tg_offers"):
+            try:
+                await self.conn.execute(
+                    f"ALTER TABLE {table_name} ADD COLUMN sticker_file_id TEXT"
+                )
+            except aiosqlite.OperationalError as error:
+                if "duplicate column" not in str(error).lower():
+                    raise
+        await self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS wallet_withdrawals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                amount REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'reserved',
+                spend_id TEXT UNIQUE,
+                transfer_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_active_withdrawal
+            ON wallet_withdrawals(user_id)
+            WHERE status IN ('reserved', 'review');
+            CREATE TABLE IF NOT EXISTS manual_purchases (
+                buyer_id INTEGER NOT NULL,
+                manual_id INTEGER NOT NULL,
+                order_id INTEGER NOT NULL,
+                PRIMARY KEY (buyer_id, manual_id)
+            );
+            CREATE TABLE IF NOT EXISTS tg_checkout_keys (
+                checkout_key TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                order_id INTEGER NOT NULL
+            );
+        """)
+        await self.conn.commit()
         # Миграции для старых БД
         try:
             await self.conn.execute("ALTER TABLE orders ADD COLUMN category TEXT DEFAULT 'verification'")
@@ -242,7 +278,7 @@ class Database:
             return row["buyer_id"]
         return None
 
-    async def get_chat_orders(self, user_id: int, limit: int = 12):
+    async def get_chat_orders(self, user_id: int, limit: int = 500):
         async with self.conn.execute(
             """SELECT id, product_name, status FROM orders
                WHERE (buyer_id = ? OR seller_id = ?)
@@ -273,6 +309,16 @@ class Database:
                 if not row or sender_id not in row:
                     await conn.rollback()
                     return None
+                # Seller may reply only after the buyer has initiated this order chat.
+                if sender_id == row[1]:
+                    async with conn.execute(
+                        "SELECT 1 FROM chat_messages WHERE order_id=? AND sender_id=? LIMIT 1",
+                        (order_id, row[0])
+                    ) as cur:
+                        initiated = await cur.fetchone()
+                    if not initiated:
+                        await conn.rollback()
+                        return None
                 receiver = row[1] if sender_id == row[0] else row[0]
                 result = await conn.execute(
                     """INSERT INTO chat_messages
@@ -344,6 +390,216 @@ class Database:
                 (message_id,)
             )
         await self.conn.commit()
+
+    # ──────────────────── ATOMIC WALLET PURCHASES AND PAYOUTS ────────────────────
+
+    async def set_item_sticker(self, kind: str, item_id: int, sticker_file_id: str):
+        table = {"verification": "products", "manual": "manuals",
+                 "tg_offer": "tg_offers"}.get(kind)
+        if not table or not sticker_file_id or len(sticker_file_id) > 250:
+            return False
+        result = await self.conn.execute(
+            f"UPDATE {table} SET sticker_file_id = ? WHERE id = ? AND is_active = 1",
+            (sticker_file_id, item_id)
+        )
+        await self.conn.commit()
+        return result.rowcount == 1
+
+    async def get_item_sticker(self, kind: str, item_id: int):
+        table = {"verification": "products", "manual": "manuals",
+                 "tg_offer": "tg_offers"}.get(kind)
+        if not table:
+            return None
+        async with self.conn.execute(
+            f"SELECT sticker_file_id FROM {table} WHERE id = ?", (item_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return row["sticker_file_id"] if row else None
+
+    async def reserve_withdrawal(self, user_id: int, amount: float):
+        """Debit once and create durable idempotent transfer intent."""
+        from decimal import Decimal, InvalidOperation
+        try:
+            value = Decimal(str(amount))
+            if not value.is_finite() or value < 1 or value > 10000 or value.as_tuple().exponent < -2:
+                return None, "Введите сумму от 1 до 10000 USDT с точностью до центов."
+        except (ValueError, InvalidOperation):
+            return None, "Некорректная сумма."
+        amount = float(value)
+        async with aiosqlite.connect(self.db_path) as conn:
+            await conn.execute("PRAGMA busy_timeout=5000")
+            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                async with conn.execute(
+                    "SELECT id FROM wallet_withdrawals WHERE user_id = ? AND status IN ('reserved', 'review')",
+                    (user_id,)
+                ) as cur:
+                    active = await cur.fetchone()
+                if active:
+                    await conn.rollback()
+                    return None, f"Вывод #{active[0]} ещё обрабатывается."
+                debited = await conn.execute(
+                    "UPDATE users SET balance = balance - ? WHERE user_id = ? AND balance >= ?",
+                    (amount, user_id, amount)
+                )
+                if debited.rowcount != 1:
+                    await conn.rollback()
+                    return None, "На балансе недостаточно средств."
+                now = datetime.utcnow().isoformat()
+                cur = await conn.execute(
+                    """INSERT INTO wallet_withdrawals(user_id, amount, status, created_at, updated_at)
+                       VALUES (?, ?, 'reserved', ?, ?)""",
+                    (user_id, amount, now, now)
+                )
+                wid = cur.lastrowid
+                spend_id = f"jaegerstore-{wid}"
+                await conn.execute("UPDATE wallet_withdrawals SET spend_id = ? WHERE id = ?",
+                                   (spend_id, wid))
+                await conn.commit()
+                return {"id": wid, "amount": amount, "spend_id": spend_id}, None
+            except Exception:
+                await conn.rollback()
+                raise
+
+    async def mark_withdrawal(self, wid: int, status: str, transfer_id=None):
+        if status not in ("sent", "review"):
+            raise ValueError("Invalid withdrawal state")
+        await self.conn.execute(
+            """UPDATE wallet_withdrawals SET status = ?, transfer_id = ?,
+               updated_at = ? WHERE id = ? AND status IN ('reserved','review')""",
+            (status, str(transfer_id) if transfer_id is not None else None,
+             datetime.utcnow().isoformat(), wid)
+        )
+        await self.conn.commit()
+
+    async def buy_manual_paid(self, buyer_id: int, manual_id: int):
+        """One lifetime manual purchase per buyer, resumable delivery."""
+        async with aiosqlite.connect(self.db_path) as conn:
+            await conn.execute("PRAGMA busy_timeout=5000")
+            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                async with conn.execute(
+                    "SELECT order_id FROM manual_purchases WHERE buyer_id = ? AND manual_id = ?",
+                    (buyer_id, manual_id)
+                ) as cur:
+                    previous = await cur.fetchone()
+                if previous:
+                    await conn.rollback()
+                    return previous[0], False, None
+                async with conn.execute(
+                    """SELECT name, buyer_price, file_id, content_text FROM manuals
+                       WHERE id = ? AND is_active = 1""", (manual_id,)
+                ) as cur:
+                    m = await cur.fetchone()
+                if not m or (not m[2] and not m[3]):
+                    await conn.rollback()
+                    return None, False, "Мануал недоступен."
+                price = float(m[1])
+                if not 0 < price <= 10000:
+                    await conn.rollback()
+                    return None, False, "Некорректная цена."
+                result = await conn.execute(
+                    "UPDATE users SET balance=balance-?, turnover=turnover+? WHERE user_id=? AND balance>=?",
+                    (price, price, buyer_id, price)
+                )
+                if result.rowcount != 1:
+                    await conn.rollback()
+                    return None, False, "Недостаточно средств."
+                now = datetime.utcnow().isoformat()
+                cursor = await conn.execute(
+                    """INSERT INTO orders(buyer_id, product_id, product_name, buyer_price,
+                       seller_price, entry_type, status, category, created_at, completed_at)
+                       VALUES(?, ?, ?, ?, 0, 'none', 'completed', 'manual', ?, ?)""",
+                    (buyer_id, manual_id, m[0], price, now, now)
+                )
+                oid = cursor.lastrowid
+                await conn.execute(
+                    "INSERT INTO manual_purchases(buyer_id,manual_id,order_id) VALUES(?,?,?)",
+                    (buyer_id, manual_id, oid)
+                )
+                await conn.commit()
+                return oid, True, None
+            except Exception:
+                await conn.rollback()
+                raise
+
+    async def buy_tg_paid(self, buyer_id: int, offer_id: int, checkout_key: str, hours: int = 3):
+        """Reserve stock + buyer debit + seller credit + order atomically."""
+        if not checkout_key or len(checkout_key) > 128:
+            return None, "Invalid purchase request"
+        async with aiosqlite.connect(self.db_path) as conn:
+            await conn.execute("PRAGMA busy_timeout=5000")
+            await conn.execute("BEGIN IMMEDIATE")
+            conn.row_factory = aiosqlite.Row
+            try:
+                async with conn.execute(
+                    "SELECT user_id, order_id FROM tg_checkout_keys WHERE checkout_key=?",
+                    (checkout_key,)
+                ) as cur:
+                    prior = await cur.fetchone()
+                if prior:
+                    await conn.rollback()
+                    if prior["user_id"] != buyer_id:
+                        return None, "Операция принадлежит другому пользователю."
+                    return prior["order_id"], None
+                async with conn.execute(
+                    "SELECT * FROM tg_offers WHERE id=? AND is_active=1", (offer_id,)
+                ) as cur:
+                    offer = await cur.fetchone()
+                if not offer:
+                    await conn.rollback()
+                    return None, "Товар недоступен."
+                async with conn.execute(
+                    """SELECT * FROM tg_stock WHERE country=? AND age_label=?
+                       AND is_sold=0 ORDER BY id LIMIT 1""",
+                    (offer["country"], offer["age_label"])
+                ) as cur:
+                    stock = await cur.fetchone()
+                if not stock:
+                    await conn.rollback()
+                    return None, "Нет в наличии."
+                price = float(offer["buyer_price"])
+                seller_pay = float(offer["seller_price"])
+                if not 0 < price <= 10000 or not 0 <= seller_pay <= price:
+                    await conn.rollback()
+                    return None, "Некорректные цены предложения."
+                charge = await conn.execute(
+                    "UPDATE users SET balance=balance-?, turnover=turnover+? WHERE user_id=? AND balance>=?",
+                    (price, price, buyer_id, price)
+                )
+                if charge.rowcount != 1:
+                    await conn.rollback()
+                    return None, "Недостаточно средств."
+                await conn.execute("UPDATE tg_stock SET is_sold=1 WHERE id=? AND is_sold=0",
+                                   (stock["id"],))
+                now = datetime.utcnow()
+                completed = now + timedelta(hours=max(1, min(hours, 24)))
+                order = await conn.execute(
+                    """INSERT INTO orders(buyer_id, product_id, product_name,
+                       buyer_price, seller_price, entry_type, status, category,
+                       stock_id, phone, created_at, auto_complete_at)
+                       VALUES (?, ?, ?, ?, ?, 'none', 'awaiting_code', 'tg_account', ?, ?, ?, ?)""",
+                    (buyer_id, offer_id,
+                     f"TG {offer['country']} {offer['age_label']}",
+                     price, seller_pay, stock["id"], stock["phone"],
+                     now.isoformat(), completed.isoformat())
+                )
+                oid = order.lastrowid
+                if stock["seller_id"] and seller_pay > 0:
+                    await conn.execute(
+                        """UPDATE users SET balance=balance+?, earned=earned+?
+                           WHERE user_id=?""",
+                        (seller_pay, seller_pay, stock["seller_id"])
+                    )
+                await conn.execute(
+                    "INSERT INTO tg_checkout_keys(checkout_key,user_id,order_id) VALUES(?,?,?)",
+                    (checkout_key, buyer_id, oid)
+                )
+                await conn.commit()
+                return oid, None
+            except Exception:
+                await conn.rollback()
+                raise
 
     # ──────────────────── USERS ────────────────────
 

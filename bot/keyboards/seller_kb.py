@@ -2,6 +2,7 @@ from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot.database.models import Order
+from bot.keyboards.pagination import page_slice, add_page_arrows
 
 
 def new_order_keyboard(order_id: int) -> InlineKeyboardMarkup:
@@ -21,11 +22,14 @@ def active_order_keyboard(order_id: int, with_email_code: bool = False) -> Inlin
     return builder.as_markup()
 
 
-def my_orders_keyboard(orders: list[Order]) -> InlineKeyboardMarkup:
+def my_orders_keyboard(orders: list[Order], page: int = 0) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    for o in orders:
-        builder.button(text=f"#{o.id} {o.product_name}", callback_data=f"view_order:{o.id}")
+    chunk, page, previous, following = page_slice(orders, page)
+    for o in chunk:
+        builder.button(text=f"#{o.id} {o.product_name}"[:60], callback_data=f"view_order:{o.id}")
         builder.button(text=f"💬 Чат #{o.id}", callback_data=f"chat:open:{o.id}")
+    add_page_arrows(builder, page, previous, following, "sellerorders")
+    builder.button(text="💬 Старые верификации", callback_data="chat:list")
     builder.button(text="◀️ Назад", callback_data="back_main")
     builder.adjust(1)
     return builder.as_markup()

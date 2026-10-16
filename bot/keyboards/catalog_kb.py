@@ -1,5 +1,6 @@
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from bot.keyboards.pagination import PAGE_SIZE, page_slice, add_page_arrows
 
 
 def categories_keyboard() -> InlineKeyboardMarkup:
@@ -12,10 +13,14 @@ def categories_keyboard() -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
-def manuals_keyboard(manuals) -> InlineKeyboardMarkup:
+def manuals_keyboard(manuals, page: int = 0) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    for m in manuals:
-        b.button(text=f"{m['name']} — {m['buyer_price']}$", callback_data=f"manual:{m['id']}")
+    chunk, page, previous, following = page_slice(manuals, page)
+    for m in chunk:
+        b.button(text=f"{m['name']} — {m['buyer_price']}$"[:60],
+                 callback_data=f"manual:{m['id']}")
+    add_page_arrows(b, page, previous, following, "catmpage")
+    b.button(text=f"Страница {page + 1}", callback_data="cat:manual")
     b.button(text="◀️ Назад", callback_data="catalog")
     b.adjust(1)
     return b.as_markup()
@@ -29,22 +34,24 @@ def confirm_manual_keyboard(manual_id: int) -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
-def tg_countries_keyboard(countries: list) -> InlineKeyboardMarkup:
+def tg_countries_keyboard(countries: list, page: int = 0) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    for c in countries:
-        b.button(text=c, callback_data=f"tg_country:{c}")
+    chunk, page, previous, following = page_slice(countries, page)
+    for i, name in enumerate(chunk, start=page * PAGE_SIZE):
+        b.button(text=name[:58], callback_data=f"tg_cidx:{i}")
+    add_page_arrows(b, page, previous, following, "catcpage")
     b.button(text="◀️ Назад", callback_data="catalog")
-    b.adjust(2)
+    b.adjust(1)
     return b.as_markup()
 
 
-def tg_ages_keyboard(country: str, offers) -> InlineKeyboardMarkup:
+def tg_ages_keyboard(country_index: int, offers, page: int = 0) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    for o in offers:
-        b.button(
-            text=f"{o['age_label']} — {o['buyer_price']}$",
-            callback_data=f"tg_offer:{o['id']}"
-        )
+    chunk, page, previous, following = page_slice(offers, page)
+    for o in chunk:
+        b.button(text=f"{o['age_label']} — {o['buyer_price']}$",
+                 callback_data=f"tg_offer:{o['id']}")
+    add_page_arrows(b, page, previous, following, f"catopage:{country_index}")
     b.button(text="◀️ Назад", callback_data="cat:tg")
     b.adjust(1)
     return b.as_markup()

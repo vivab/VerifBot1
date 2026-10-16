@@ -3,6 +3,10 @@ import re
 import secrets
 from html import escape
 from aiogram import Router, F, Bot
+import logging
+from decimal import Decimal, InvalidOperation
+from aiogram.types import InlineKeyboardMarkup
+from bot.keyboards.pagination import PAGE_SIZE, page_slice
 from aiogram.types import Message, CallbackQuery, BufferedInputFile
 from aiogram.fsm.context import FSMContext
 
@@ -25,6 +29,7 @@ from bot.config import settings
 from bot.i18n import tr, menu_variants
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 # ──────────────────── КАТАЛОГ ────────────────────
@@ -63,6 +68,17 @@ async def cat_verification(callback: CallbackQuery):
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("catvpage:"))
+async def cat_verification_page(callback: CallbackQuery):
+    page = max(0, int(callback.data.rsplit(":", 1)[1]))
+    products = await db.get_all_products()
+    await callback.message.edit_text(
+        f"👥 <b>Верификации</b> — страница {page + 1}\n\nВыберите позицию:",
+        reply_markup=catalog_keyboard(products, page)
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data == "cat:manual")
 async def cat_manual(callback: CallbackQuery):
     manuals = await db.get_all_manuals(only_active=True)
@@ -74,6 +90,17 @@ async def cat_manual(callback: CallbackQuery):
         "📘 <b>Мануалы</b>\n\nВыберите:",
         reply_markup=manuals_keyboard(manuals),
         parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("catmpage:"))
+async def cat_manual_page(callback: CallbackQuery):
+    page = max(0, int(callback.data.rsplit(":", 1)[1]))
+    manuals = await db.get_all_manuals()
+    await callback.message.edit_text(
+        f"📘 <b>Мануалы</b> — страница {page + 1}\n\nВыберите:",
+        reply_markup=manuals_keyboard(manuals, page)
     )
     await callback.answer()
 
@@ -92,6 +119,12 @@ async def manual_view(callback: CallbackQuery):
         reply_markup=confirm_manual_keyboard(mid),
         parse_mode="HTML"
     )
+    sticker_id = await db.get_item_sticker("manual", mid)
+    if sticker_id:
+        try:
+            await callback.message.answer_sticker(sticker_id)
+        except Exception:
+            logger.warning("Cannot send manual sticker #%s", mid)
     await callback.answer()
 
 
@@ -99,41 +132,39 @@ async def manual_view(callback: CallbackQuery):
 async def buy_manual(callback: CallbackQuery):
     mid = int(callback.data.split(":")[1])
     m = await db.get_manual(mid)
-    if not m or not m["is_active"]:
-        await callback.answer("Недоступно", show_alert=True)
+    if not m or (not m["file_id"] and not m["content_text"]):
+        await callback.answer("Мануал недоступен.", show_alert=True)
         return
-    if not m["file_id"] and not m["content_text"]:
-        await callback.answer("Мануал пока не загружен, обратитесь в поддержку.", show_alert=True)
+    try:
+        order_id, fresh, error = await db.buy_manual_paid(callback.from_user.id, mid)
+    except Exception:
+        logger.exception("Manual purchase failed")
+        await callback.answer("Ошибка покупки. Проверьте «Мои покупки».", show_alert=True)
         return
-
-    price = m["buyer_price"]
-    charged = await db.debit_if_sufficient(callback.from_user.id, price)
-    if not charged:
-        await callback.answer("Недостаточно средств.", show_alert=True)
+    if error:
+        await callback.answer(error, show_alert=True)
         return
-
     try:
         if m["file_id"]:
             await callback.message.answer_document(m["file_id"])
         else:
-            document = BufferedInputFile(
-                m["content_text"].encode("utf-8"),
-                filename=f"manual_{mid}.txt"
-            )
-            await callback.message.answer_document(document)
+            await callback.message.answer_document(
+                BufferedInputFile(m["content_text"].encode("utf-8"),
+                                  filename=f"manual_{mid}.txt"))
     except Exception:
-        await db.update_balance(callback.from_user.id, price)
+        logger.exception("Manual delivery failed for order %d", order_id)
         await callback.answer(
-            "Не удалось выдать файл. Сумма возвращена на баланс.",
+            "Оплата сохранена. Файл временно не отправлен; повторно нажмите «Купить» "
+            "или откройте «Мои покупки» — второй раз деньги не спишутся.",
             show_alert=True
         )
         return
-
-    await db.add_turnover(callback.from_user.id, price)
-    await db.create_manual_order(callback.from_user.id, m)
-    await callback.answer("Мануал отправлен!")
+    await callback.answer("Мануал получен")
     try:
-        await callback.message.edit_text("✅ Мануал куплен и отправлен документом .txt.")
+        await callback.message.edit_text(
+            f"✅ Мануал отправлен документом .txt.\nЗаказ #{order_id}."
+            + ("\nСписано один раз." if fresh else "\nПовторная выдача бесплатно.")
+        )
     except Exception:
         pass
 
@@ -152,6 +183,49 @@ async def cat_tg(callback: CallbackQuery):
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("catcpage:"))
+async def tg_country_page(callback: CallbackQuery):
+    page = max(0, int(callback.data.rsplit(":", 1)[1]))
+    countries = await db.get_tg_countries()
+    await callback.message.edit_text(
+        f"📱 Страны — страница {page + 1}\n\nВыберите:",
+        reply_markup=tg_countries_keyboard(countries, page)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("tg_cidx:"))
+async def tg_country_index(callback: CallbackQuery):
+    index = int(callback.data.rsplit(":", 1)[1])
+    countries = await db.get_tg_countries()
+    if index < 0 or index >= len(countries):
+        await callback.answer("Список изменился, откройте каталог заново.", show_alert=True)
+        return
+    country = countries[index]
+    offers = await db.get_tg_offers_by_country(country)
+    await callback.message.edit_text(
+        f"📱 <b>{escape(country)}</b>\n\nВыберите тип:",
+        reply_markup=tg_ages_keyboard(index, offers)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("catopage:"))
+async def tg_offers_page(callback: CallbackQuery):
+    _, index, number = callback.data.split(":")
+    idx, page = int(index), max(0, int(number))
+    countries = await db.get_tg_countries()
+    if idx < 0 or idx >= len(countries):
+        await callback.answer("Обновите каталог.", show_alert=True)
+        return
+    offers = await db.get_tg_offers_by_country(countries[idx])
+    await callback.message.edit_text(
+        f"📱 <b>{escape(countries[idx])}</b> — страница {page + 1}",
+        reply_markup=tg_ages_keyboard(idx, offers, page)
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("tg_country:"))
 async def tg_country(callback: CallbackQuery):
     country = callback.data.split(":", 1)[1]
@@ -163,9 +237,11 @@ async def tg_country(callback: CallbackQuery):
     for o in offers:
         stock = await db.count_tg_stock(o["country"], o["age_label"])
         lines.append(f"{o['age_label']} — {o['buyer_price']}$ (в наличии: {stock})")
+    countries = await db.get_tg_countries()
+    country_index = countries.index(country) if country in countries else 0
     await callback.message.edit_text(
-        f"📱 <b>{country}</b>\n\n" + "\n".join(lines) + "\n\nВыберите:",
-        reply_markup=tg_ages_keyboard(country, offers),
+        f"📱 <b>{escape(country)}</b>\n\nВыберите:",
+        reply_markup=tg_ages_keyboard(country_index, offers),
         parse_mode="HTML"
     )
     await callback.answer()
@@ -175,7 +251,7 @@ async def tg_country(callback: CallbackQuery):
 async def tg_offer_view(callback: CallbackQuery):
     oid = int(callback.data.split(":")[1])
     o = await db.get_tg_offer(oid)
-    if not o:
+    if not o or not o["is_active"]:
         await callback.answer("Не найдено", show_alert=True)
         return
     stock = await db.count_tg_stock(o["country"], o["age_label"])
@@ -188,47 +264,42 @@ async def tg_offer_view(callback: CallbackQuery):
         reply_markup=confirm_tg_keyboard(oid),
         parse_mode="HTML"
     )
+    sticker_id = await db.get_item_sticker("tg_offer", oid)
+    if sticker_id:
+        try:
+            await callback.message.answer_sticker(sticker_id)
+        except Exception:
+            logger.warning("Cannot send offer sticker #%s", oid)
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("buy_tg:"))
 async def buy_tg(callback: CallbackQuery):
     oid = int(callback.data.split(":")[1])
-    o = await db.get_tg_offer(oid)
-    if not o or not o["is_active"]:
-        await callback.answer("Недоступно", show_alert=True)
+    # The same button/message can be clicked twice. Idempotency key stops double debit.
+    key = f"tg:{callback.from_user.id}:{callback.message.chat.id}:{callback.message.message_id}:{oid}"
+    try:
+        order_id, error = await db.buy_tg_paid(
+            callback.from_user.id, oid, key,
+            hours=getattr(app_settings, "TG_ORDER_HOURS", 3)
+        )
+    except Exception:
+        logger.exception("TG account checkout failed")
+        await callback.answer("Ошибка оформления; проверьте историю покупок.", show_alert=True)
         return
-    user = await db.get_user(callback.from_user.id)
-    if user.balance < o["buyer_price"]:
-        await callback.answer(f"Недостаточно средств. Нужно {o['buyer_price']}$", show_alert=True)
+    if error:
+        await callback.answer(error, show_alert=True)
         return
-    stock = await db.take_tg_stock(o["country"], o["age_label"])
-    if not stock:
-        await callback.answer("Нет в наличии", show_alert=True)
-        return
-    await db.update_balance(user.user_id, -o["buyer_price"])
-    await db.add_turnover(user.user_id, o["buyer_price"])
-    hours = getattr(app_settings, "TG_ORDER_HOURS", 3)
-    order_id = await db.create_tg_account_order(user.user_id, o, stock, hours=hours)
-
-    # Начислить продавцу если есть
-    if stock["seller_id"] and o["seller_price"] > 0:
-        await db.update_balance(stock["seller_id"], o["seller_price"])
-        await db.add_seller_stats(stock["seller_id"], o["seller_price"])
-
+    order = await db.get_order(order_id)
     await callback.message.edit_text(
-        f"✅ Аккаунт выдан! Заказ <b>#{order_id}</b>\n\n"
-        f"Страна: {o['country']}\n"
-        f"Тип: {o['age_label']}\n"
-        f"Номер: <code>{stock['phone']}</code>\n\n"
-        f"1. Нажмите «Запросить код» когда будете входить\n"
-        f"2. После входа — «Завершить заказ»\n"
-        f"3. Авто-завершение через {hours} ч.",
-        reply_markup=tg_order_keyboard(order_id),
-        parse_mode="HTML"
+        f"✅ Покупка оформлена! Заказ #{order_id}\n\n"
+        f"Товар: {escape(order.product_name)}\n"
+        f"Номер: <code>{escape(order.phone or '—')}</code>\n"
+        "Чтобы восстановить покупку, откройте «Мои покупки».\n"
+        "Никому не передавайте коды входа и пароли.",
+        reply_markup=tg_order_keyboard(order_id)
     )
-    await callback.answer()
-
+    await callback.answer("Покупка подтверждена")
 
 @router.callback_query(F.data.startswith("tg_code:"))
 async def tg_request_code(callback: CallbackQuery):
@@ -288,6 +359,12 @@ async def buy_product(callback: CallbackQuery):
         f"Ваш баланс: {user.balance:.2f}$"
     )
     await callback.message.edit_text(text, reply_markup=confirm_buy_keyboard(product_id), parse_mode="HTML")
+    sticker_id = await db.get_item_sticker("verification", product_id)
+    if sticker_id:
+        try:
+            await callback.message.answer_sticker(sticker_id)
+        except Exception:
+            logger.warning("Cannot send verification sticker #%s", product_id)
     await callback.answer()
 
 
@@ -500,39 +577,65 @@ async def withdraw_start(callback: CallbackQuery, state: FSMContext):
 @router.message(WithdrawStates.waiting_amount)
 async def withdraw_amount(message: Message, state: FSMContext):
     try:
-        amount = float(message.text.replace(",", ".").strip())
-    except ValueError:
-        await message.answer("Введите число, например: 10")
-        return
-
-    if amount < 1:
-        await message.answer("Минимальная сумма вывода — 1$")
+        amount = Decimal((message.text or "").replace(",", ".").strip())
+        if not amount.is_finite() or amount < 1 or amount > 10000 or amount.as_tuple().exponent < -2:
+            raise ValueError
+    except (InvalidOperation, ValueError):
+        await message.answer("Введите сумму от 1 до 10000 USDT (например: 3.50).")
         return
 
     user = await db.get_user(message.from_user.id)
-    if amount > user.balance:
-        await message.answer(f"Недостаточно средств. Баланс: {user.balance:.2f}$")
+    if not user:
+        await state.clear()
+        await message.answer("Сначала нажмите /start.")
+        return
+    reservation, error = await db.reserve_withdrawal(message.from_user.id, float(amount))
+    if error:
+        await message.answer(f"❌ {error}")
         return
 
-    # Списываем
-    await db.update_balance(user.user_id, -amount)
-
-    try:
-        check = await cryptopay.create_check(amount=amount)
-        await message.answer(
-            f"✅ Чек на <b>{amount}$</b> создан!\n\n"
-            f"🔗 {check['bot_check_url']}\n\n"
-            f"Перейдите по ссылке и активируйте чек в @CryptoBot",
-            parse_mode="HTML",
-            reply_markup=main_menu(user.role)
-        )
-    except Exception as e:
-        # Возвращаем деньги при ошибке
-        await db.update_balance(user.user_id, amount)
-        await message.answer(f"❌ Ошибка создания чека: {e}\nСредства возвращены на баланс.")
-
     await state.clear()
+    try:
+        result = await cryptopay.transfer_to_user(
+            message.from_user.id, reservation["amount"], reservation["spend_id"]
+        )
+    except Exception:
+        logger.exception("CryptoPay withdrawal #%d not confirmed", reservation["id"])
+        try:
+            # If the network failed after processing, the same spend_id MUST NOT
+            # be retried as a new withdrawal. Check provider before determining outcome.
+            previous = await cryptopay.get_transfer_by_spend_id(reservation["spend_id"])
+        except Exception:
+            previous = None
+        if not previous:
+            await db.mark_withdrawal(reservation["id"], "review")
+            await message.answer(
+                f"⏳ Вывод #{reservation['id']} требует проверки. "
+                "Сумма зарезервирована, чтобы не списать и не отправить её дважды. "
+                "Обратитесь в поддержку с номером вывода."
+            )
+            return
+        result = previous
 
+    status = result.get("status", "completed")
+    if status == "returned":
+        await db.mark_withdrawal(reservation["id"], "review",
+                                 result.get("transfer_id"))
+        await message.answer("⏳ Перевод возвращён сервисом. Поддержка проверит вывод.")
+        return
+    if status not in ("completed", "pending"):
+        await db.mark_withdrawal(reservation["id"], "review",
+                                 result.get("transfer_id"))
+        await message.answer("⏳ Неизвестный статус перевода. Поддержка проверит.")
+        return
+    await db.mark_withdrawal(reservation["id"], "sent",
+                             result.get("transfer_id"))
+    await message.answer(
+        f"✅ Вывод #{reservation['id']} на {reservation['amount']:.2f} USDT "
+        "отправлен на ваш Crypto Bot. "
+        + ("Ожидается завершение перевода." if status == "pending" else "Проверьте кошелёк."),
+        reply_markup=main_menu(user.role, await db.get_language(user.user_id))
+    )
 
 # ──────────────────── ПОПОЛНЕНИЕ ────────────────────
 

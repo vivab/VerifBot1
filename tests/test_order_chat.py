@@ -85,6 +85,13 @@ class OrderChatTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_message_waits_for_telegram_outage_and_retries(self):
         await self.db.take_order(self.order_id, self.seller_id)
+        # Buyer must initiate before seller is allowed to answer.
+        self.assertIsNone(await self.db.queue_chat_message(
+            self.order_id, self.seller_id, "Not first", "en"
+        ))
+        self.assertIsNotNone(await self.db.queue_chat_message(
+            self.order_id, self.buyer_id, "Help", "ru"
+        ))
         message_id = await self.db.queue_chat_message(
             self.order_id, self.seller_id, "Hello!", "en"
         )
@@ -113,6 +120,20 @@ class OrderChatTests(unittest.IsolatedAsyncioTestCase):
         await self.db.complete_verification_and_pay_seller(self.order_id, self.seller_id)
         self.assertEqual(await self.db.chat_recipient(self.order_id, self.buyer_id),
                          self.seller_id)
+
+
+    async def test_seller_may_only_reply_to_buyer_in_old_completed_orders(self):
+        await self.db.take_order(self.order_id, self.seller_id)
+        await self.db.complete_verification_and_pay_seller(self.order_id, self.seller_id)
+        self.assertIsNone(await self.db.queue_chat_message(
+            self.order_id, self.seller_id, "First", "ru"
+        ))
+        self.assertIsNotNone(await self.db.queue_chat_message(
+            self.order_id, self.buyer_id, "Need followup", "en"
+        ))
+        self.assertIsNotNone(await self.db.queue_chat_message(
+            self.order_id, self.seller_id, "Answer", "ru"
+        ))
 
     async def test_localized_menu_labels(self):
         self.assertEqual(tr("en", "language_saved"), "✅ Language updated.")

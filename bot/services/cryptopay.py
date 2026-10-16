@@ -116,4 +116,28 @@ class CryptoPayService:
         }
 
 
+
+    async def transfer_to_user(self, user_id: int, amount: float, spend_id: str) -> dict:
+        """Idempotent Crypto Bot payout: only one transfer per spend_id."""
+        if not spend_id or len(spend_id) > 128:
+            raise ValueError("Invalid transfer identifier")
+        transfer = await self._request("transfer", {
+            "user_id": int(user_id),
+            "asset": "USDT",
+            "amount": _positive_amount(amount),
+            "spend_id": spend_id,
+            "comment": "JägerStore withdrawal",
+        })
+        return transfer
+
+    async def get_transfer_by_spend_id(self, spend_id: str):
+        data = await self._request("getTransfers", {"spend_id": spend_id})
+        if isinstance(data, list):
+            transfers = data
+        elif isinstance(data, dict):
+            transfers = data.get("items") or data.get("transfers") or []
+        else:
+            transfers = []
+        return next((t for t in transfers if t.get("spend_id") == spend_id), None)
+
 cryptopay = CryptoPayService()

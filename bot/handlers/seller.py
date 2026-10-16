@@ -40,6 +40,20 @@ async def my_orders(message: Message):
     await message.answer(text, reply_markup=my_orders_keyboard(orders), parse_mode="HTML")
 
 
+@router.callback_query(F.data.startswith("sellerorders:"))
+async def seller_orders_page(callback: CallbackQuery):
+    user = await db.get_user(callback.from_user.id)
+    if not user or user.role not in (UserRole.SELLER, UserRole.ADMIN, UserRole.OWNER):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    orders = await db.get_seller_active_orders(callback.from_user.id)
+    page = max(0, min(10000, int(callback.data.rsplit(":", 1)[1])))
+    await callback.message.edit_text(
+        f"📋 Незавершённые заказы — страница {page + 1}",
+        reply_markup=my_orders_keyboard(orders, page))
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("take_order:"))
 async def take_order(callback: CallbackQuery, bot: Bot):
     order_id = int(callback.data.split(":")[1])

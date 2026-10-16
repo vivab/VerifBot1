@@ -48,6 +48,68 @@ async def auto_complete_tg_orders(bot: Bot):
             logger.error(f"auto_complete error: {e}")
 
 
+async def reconcile_wallet(bot: Bot):
+    """Reconcile paid invoices and pending Crypto Bot transfers without double credit."""
+    while True:
+        try:
+            for row in await db.get_recent_pending_invoices():
+                try:
+                    if await cryptopay.check_invoice_paid(row["invoice_id"]):
+                        credited = await db.credit_paid_invoice_once(
+                            row["user_id"], row["invoice_id"]
+                        )
+                        if credited is not None:
+                            try:
+                                await bot.send_message(
+                                    row["user_id"],
+                                    f"✅ Пополнение {credited:.2f} USDT подтверждено! Баланс обновлён."
+                                )
+                            except Exception:
+                                pass
+                except Exception as error:
+                    logger.warning("Topup #%s check failed: %s",
+                                   row["invoice_id"], type(error).__name__)
+
+            for row in await db.open_withdrawals():
+                await db.mark_withdrawal_checked(row["id"])
+                try:
+                    transfer = await cryptopay.get_transfer_by_spend_id(row["spend_id"])
+                    if transfer is None:
+                        # Same spend_id: Crypto Pay accepts only one transfer for it.
+                        transfer = await cryptopay.transfer_to_user(
+                            row["user_id"], row["amount"], row["spend_id"]
+                        )
+                    status = transfer.get("status", "completed")
+                    if status == "returned":
+                        if await db.refund_returned_withdrawal(row["id"]):
+                            try:
+                                await bot.send_message(
+                                    row["user_id"],
+                                    f"↩️ Вывод #{row['id']} возвращён Crypto Bot. "
+                                    f"{row['amount']:.2f} USDT вновь на вашем балансе."
+                                )
+                            except Exception:
+                                pass
+                    elif status == "completed":
+                        await db.mark_withdrawal(
+                            row["id"], "sent", transfer.get("transfer_id")
+                        )
+                        try:
+                            await bot.send_message(
+                                row["user_id"], f"✅ Вывод #{row['id']} завершён Crypto Bot."
+                            )
+                        except Exception:
+                            pass
+                except Exception as error:
+                    logger.warning("Withdrawal #%s needs reconciliation: %s",
+                                   row["id"], type(error).__name__)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Wallet reconciliation failed")
+        await asyncio.sleep(60)
+
+
 async def on_startup(bot: Bot):
     await db.connect()
     try:
@@ -58,6 +120,7 @@ async def on_startup(bot: Bot):
     logger.info(f"Bot started: @{me.username}")
     _background_tasks.append(asyncio.create_task(auto_complete_tg_orders(bot)))
     _background_tasks.append(asyncio.create_task(chat.chat_delivery_worker(bot)))
+    _background_tasks.append(asyncio.create_task(reconcile_wallet(bot)))
 
 
 async def on_shutdown(bot: Bot):

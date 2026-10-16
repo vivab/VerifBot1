@@ -619,16 +619,16 @@ async def withdraw_amount(message: Message, state: FSMContext):
 
     status = result.get("status", "completed")
     if status == "returned":
-        await db.mark_withdrawal(reservation["id"], "review",
-                                 result.get("transfer_id"))
-        await message.answer("⏳ Перевод возвращён сервисом. Поддержка проверит вывод.")
+        await db.refund_returned_withdrawal(reservation["id"])
+        await message.answer("↩️ Crypto Bot вернул перевод. Деньги вновь на балансе.")
         return
     if status not in ("completed", "pending"):
         await db.mark_withdrawal(reservation["id"], "review",
                                  result.get("transfer_id"))
         await message.answer("⏳ Неизвестный статус перевода. Поддержка проверит.")
         return
-    await db.mark_withdrawal(reservation["id"], "sent",
+    await db.mark_withdrawal(reservation["id"],
+                             "sent" if status == "completed" else "review",
                              result.get("transfer_id"))
     await message.answer(
         f"✅ Вывод #{reservation['id']} на {reservation['amount']:.2f} USDT "

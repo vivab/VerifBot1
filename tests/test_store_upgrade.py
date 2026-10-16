@@ -68,6 +68,32 @@ class UpgradeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(first["spend_id"], third["spend_id"])
         self.assertEqual((await self.db.get_user(self.buyer)).balance, 76)
 
+
+    async def test_returned_withdrawal_refunded_exactly_once(self):
+        reserved, error = await self.db.reserve_withdrawal(self.buyer, 8)
+        self.assertIsNone(error)
+        self.assertEqual((await self.db.get_user(self.buyer)).balance, 92)
+        self.assertTrue(await self.db.refund_returned_withdrawal(reserved["id"]))
+        self.assertFalse(await self.db.refund_returned_withdrawal(reserved["id"]))
+        self.assertEqual((await self.db.get_user(self.buyer)).balance, 100)
+
+    async def test_wallet_check_list_is_throttled(self):
+        reserved, error = await self.db.reserve_withdrawal(self.buyer, 4)
+        self.assertIsNone(error)
+        self.assertEqual(len(await self.db.open_withdrawals()), 1)
+        await self.db.mark_withdrawal_checked(reserved["id"])
+        self.assertEqual(await self.db.open_withdrawals(), [])
+
+    async def test_pending_crypto_invoice_resumes_after_restart(self):
+        await self.db.save_invoice(775401, self.buyer, 12, "topup")
+        self.assertTrue(any(row["invoice_id"] == 775401
+                            for row in await self.db.get_recent_pending_invoices()))
+        await self.db.close()
+        await self.db.connect()
+        self.assertEqual(await self.db.credit_paid_invoice_once(self.buyer, 775401), 12)
+        self.assertIsNone(await self.db.credit_paid_invoice_once(self.buyer, 775401))
+        self.assertEqual((await self.db.get_user(self.buyer)).balance, 112)
+
     async def test_manual_purchase_idempotent(self):
         manual = await self.db.add_manual("Manual", 5, "text", content_text="read")
         order_a, fresh, error = await self.db.buy_manual_paid(self.buyer, manual)

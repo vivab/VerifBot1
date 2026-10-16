@@ -30,12 +30,20 @@ async def my_orders(message: Message):
 
     orders = await db.get_seller_active_orders(user.user_id)
     if not orders:
-        await message.answer("У вас нет активных заказов.", reply_markup=back_keyboard())
+        from bot.keyboards.chat_kb import chat_orders_keyboard
+        chats = await db.get_chat_orders(user.user_id)
+        await message.answer(
+            "У вас нет активных заказов. Переписки по старым верификациям доступны ниже.",
+            reply_markup=chat_orders_keyboard(chats, await db.get_language(user.user_id))
+            if chats else back_keyboard()
+        )
         return
 
     text = "📋 <b>Ваши активные заказы:</b>\n\n"
-    for o in orders:
+    for o in orders[:5]:
         text += f"#{o.id} — {o.product_name} ({o.seller_price}$)\n"
+    if len(orders) > 5:
+        text += "\nОстальные заказы смотрите кнопками ➡️."
 
     await message.answer(text, reply_markup=my_orders_keyboard(orders), parse_mode="HTML")
 

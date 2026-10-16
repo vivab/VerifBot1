@@ -191,6 +191,14 @@ class Database:
             );
         """)
         await self.conn.commit()
+        try:
+            await self.conn.execute(
+                "ALTER TABLE wallet_withdrawals ADD COLUMN last_checked_at TEXT"
+            )
+            await self.conn.commit()
+        except aiosqlite.OperationalError as error:
+            if "duplicate column" not in str(error).lower():
+                raise
         # Миграции для старых БД
         try:
             await self.conn.execute("ALTER TABLE orders ADD COLUMN category TEXT DEFAULT 'verification'")
@@ -471,6 +479,69 @@ class Database:
              datetime.utcnow().isoformat(), wid)
         )
         await self.conn.commit()
+
+    async def open_withdrawals(self, limit: int = 5):
+        """Return withdrawals due for reconciliation, at most once every three minutes."""
+        old = (datetime.utcnow() - timedelta(minutes=3)).isoformat()
+        async with self.conn.execute(
+            """SELECT id, user_id, amount, spend_id, status
+               FROM wallet_withdrawals
+               WHERE status IN ('reserved','review')
+                 AND (last_checked_at IS NULL OR last_checked_at < ?)
+               ORDER BY id ASC LIMIT ?""", (old, limit)
+        ) as cur:
+            return await cur.fetchall()
+
+    async def mark_withdrawal_checked(self, wid: int):
+        now = datetime.utcnow().isoformat()
+        await self.conn.execute(
+            """UPDATE wallet_withdrawals SET last_checked_at = ?,
+               updated_at = ? WHERE id = ? AND status IN ('reserved','review')""",
+            (now, now, wid)
+        )
+        await self.conn.commit()
+
+    async def refund_returned_withdrawal(self, wid: int):
+        """Only on explicit Crypto Pay 'returned' status; never credit twice."""
+        async with aiosqlite.connect(self.db_path) as conn:
+            await conn.execute("PRAGMA busy_timeout=5000")
+            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                async with conn.execute(
+                    """SELECT user_id, amount FROM wallet_withdrawals
+                       WHERE id = ? AND status IN ('reserved','review')""", (wid,)
+                ) as cur:
+                    row = await cur.fetchone()
+                if not row:
+                    await conn.rollback()
+                    return False
+                changed = await conn.execute(
+                    """UPDATE wallet_withdrawals SET status = 'refunded', updated_at = ?
+                       WHERE id = ? AND status IN ('reserved','review')""",
+                    (datetime.utcnow().isoformat(), wid)
+                )
+                if changed.rowcount != 1:
+                    await conn.rollback()
+                    return False
+                await conn.execute(
+                    "UPDATE users SET balance = balance + ? WHERE user_id = ?",
+                    (row[1], row[0])
+                )
+                await conn.commit()
+                return True
+            except Exception:
+                await conn.rollback()
+                raise
+
+    async def get_recent_pending_invoices(self, limit: int = 10):
+        # Invoices expire after one hour; a two-hour recovery window is sufficient.
+        earliest = (datetime.utcnow() - timedelta(hours=2)).isoformat()
+        async with self.conn.execute(
+            """SELECT invoice_id, user_id, amount FROM invoices
+               WHERE status = 'active' AND purpose = 'topup' AND created_at >= ?
+               ORDER BY created_at DESC LIMIT ?""", (earliest, limit)
+        ) as cur:
+            return await cur.fetchall()
 
     async def buy_manual_paid(self, buyer_id: int, manual_id: int):
         """One lifetime manual purchase per buyer, resumable delivery."""

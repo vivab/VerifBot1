@@ -713,6 +713,31 @@ async def add_tg_offer_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+_AGE_LABELS = (
+    "Новорег", "1 месяц", "3 месяца", "6 месяцев", "1 год",
+    "2 года", "3 года", "5 лет", "10 лет", "15 лет"
+)
+
+def _owner_age_keyboard(page: int):
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from bot.keyboards.pagination import page_slice, add_page_arrows
+    builder = InlineKeyboardBuilder()
+    chunk, page, previous, following = page_slice(_AGE_LABELS, page)
+    for age in chunk:
+        builder.button(text=age, callback_data=f"owner:tg_age:{age}")
+    add_page_arrows(builder, page, previous, following, "owner:tg_age_page")
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+@router.callback_query(F.data.startswith("owner:tg_age_page:"), OwnerAddTgOffer.age)
+async def owner_age_page(callback: CallbackQuery):
+    page = max(0, min(2, int(callback.data.rsplit(":", 1)[1])))
+    await callback.message.edit_text("Выберите возраст аккаунта:",
+                                     reply_markup=_owner_age_keyboard(page))
+    await callback.answer()
+
+
 @router.message(OwnerAddTgOffer.country)
 async def add_tg_offer_country(message: Message, state: FSMContext):
     country = (message.text or "").strip()
@@ -721,15 +746,7 @@ async def add_tg_offer_country(message: Message, state: FSMContext):
         return
     await state.update_data(country=country)
     await state.set_state(OwnerAddTgOffer.age)
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
-    b = InlineKeyboardBuilder()
-    for age in (
-        "Новорег", "1 месяц", "3 месяца", "6 месяцев", "1 год",
-        "2 года", "3 года", "5 лет", "10 лет", "15 лет"
-    ):
-        b.button(text=age, callback_data=f"owner:tg_age:{age}")
-    b.adjust(2)
-    await message.answer("Выберите возраст аккаунта:", reply_markup=b.as_markup())
+    await message.answer("Выберите возраст аккаунта:", reply_markup=_owner_age_keyboard(0))
 
 
 @router.callback_query(F.data.startswith("owner:tg_age:"), OwnerAddTgOffer.age)
@@ -767,6 +784,9 @@ async def add_tg_offer_seller_price(message: Message, state: FSMContext):
         await message.answer("Введите корректную цену продавца, например: 6")
         return
     data = await state.get_data()
+    if price > data["buyer_price"]:
+        await message.answer("Цена продавца не должна превышать цену покупателя.")
+        return
     oid = await db.add_tg_offer(
         data["country"], data["age"], data["buyer_price"], price
     )

@@ -886,7 +886,8 @@ class Database:
         return cursor.lastrowid
 
     async def create_paid_verification_order(
-        self, buyer_id: int, product_id: int, entry_data: dict, checkout_key: str
+        self, buyer_id: int, product_id: int, entry_data: dict | None,
+        checkout_key: str
     ):
         """Charge and create order atomically. Repeated checkout never charges twice."""
         if not checkout_key or len(checkout_key) > 128:
@@ -915,10 +916,19 @@ class Database:
                 if not product:
                     await conn.rollback()
                     return None, "Позиция больше недоступна."
+                # Price 0 is a valid free/test item. Negative, NaN and infinity
+                # are not valid prices; no buyer data is needed for a verification.
+                from math import isfinite
                 price = float(product[2])
-                if not 0 < price < 1000000:
+                seller_price = float(product[3])
+                if not isfinite(price) or not 0 <= price < 1000000:
                     await conn.rollback()
-                    return None, "Некорректная цена позиции. Напишите в поддержку."
+                    return None, "Цена товара настроена неверно. Попросите владельца проверить цену покупателя."
+                if not isfinite(seller_price) or seller_price < 0:
+                    await conn.rollback()
+                    return None, "Цена продавца настроена неверно. Напишите в поддержку."
+                # Free promotions do not create money out of thin air for seller payouts.
+                order_seller_price = seller_price if price > 0 else 0.0
                 debit = await conn.execute(
                     """UPDATE users SET balance = balance - ?,
                        turnover = turnover + ?, verifications_bought = verifications_bought + 1
@@ -934,9 +944,9 @@ class Database:
                         entry_type, status, entry_data, category, created_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'verification', ?)""",
                     (
-                        buyer_id, product[0], product[1], price, product[3],
+                        buyer_id, product[0], product[1], price, order_seller_price,
                         product[4], OrderStatus.PENDING.value,
-                        json.dumps(entry_data, ensure_ascii=False), now
+                        None, now
                     ),
                 )
                 order_id = result.lastrowid

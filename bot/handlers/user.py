@@ -354,8 +354,8 @@ async def buy_product(callback: CallbackQuery):
     text = (
         f"<b>{product.name}</b>\n\n"
         f"💰 Цена: <b>{product.buyer_price}$</b>\n"
-        f"📋 Способ связи: {'Email' if product.entry_type == EntryType.EMAIL else 'Telegram'}\n" 
-        f"🔐 Код и пароль покупатель вводит самостоятельно.\n\n"
+        "💬 Связь только через анонимный чат после принятия заказа.\n"
+        "Номер телефона и @username вводить не требуется.\n\n"
         f"Ваш баланс: {user.balance:.2f}$"
     )
     await callback.message.edit_text(text, reply_markup=confirm_buy_keyboard(product_id), parse_mode="HTML")
@@ -369,75 +369,73 @@ async def buy_product(callback: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("confirm_buy:"))
-async def confirm_buy(callback: CallbackQuery, state: FSMContext):
-    product_id = int(callback.data.split(":")[1])
+async def confirm_buy(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    """One-tap verification purchase: no contact form, no OTPs, no phone."""
+    try:
+        product_id = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Некорректный товар.", show_alert=True)
+        return
+
     product = await db.get_product(product_id)
     if not product or not product.is_active:
-        await callback.answer("Позиция недоступна", show_alert=True)
+        await callback.answer("Товар больше недоступен.", show_alert=True)
         return
 
-    user = await db.get_user(callback.from_user.id)
-    if not user or user.balance < product.buyer_price:
-        await callback.answer(
-            "Недостаточно средств. Пополните баланс и попробуйте снова.",
-            show_alert=True,
-        )
-        return
-
-    # На этом шаге НЕ списываем средства. Отмена безопасна.
+    # The same purchase button (same Telegram message) is one checkout.
+    # Repeated callback deliveries must NEVER charge a second time.
+    checkout_key = (
+        f"verify:{callback.from_user.id}:{callback.message.chat.id}:"
+        f"{callback.message.message_id}:{product_id}"
+    )
+    # Clear leftover phone/email prompt from older releases, if any.
     await state.clear()
-    await state.update_data(product_id=product_id, checkout_key=secrets.token_hex(16))
-    if product.entry_type == EntryType.EMAIL:
-        await state.set_state(BuyStates.waiting_email)
-        prompt = (
-            "📧 Укажите email для связи по заказу.\n"
-            "Не присылайте пароль или код — авторизацию выполняйте самостоятельно."
-        )
-    else:
-        await state.set_state(BuyStates.waiting_phone)
-        prompt = (
-            "📱 Укажите контакт Telegram: @username либо номер "
-            "телефона в формате +79001234567.\n\n"
-            "Это способ связи, а НЕ вход в аккаунт. "
-            "Не передавайте никому коды подтверждения.\n\n"
-            "💳 Сумма спишется только после создания заказа. "
-            "До этого «Отмена» бесплатна."
-        )
-    await callback.message.edit_text(prompt, reply_markup=cancel_keyboard())
-    await callback.answer()
-
-
-async def _finish_verification_order(message: Message, state: FSMContext, bot: Bot, contact: dict):
-    data = await state.get_data()
-    product_id = data.get("product_id")
-    checkout_key = data.get("checkout_key")
-    if not product_id or not checkout_key:
-        await state.clear()
-        await message.answer("Сессия покупки устарела. Вернитесь в каталог.")
-        return
-
     try:
         order_id, error = await db.create_paid_verification_order(
-            message.from_user.id, product_id, contact, checkout_key
+            callback.from_user.id, product_id, None, checkout_key
         )
     except Exception:
-        await message.answer(
-            "⚠️ Не удалось оформить заказ. Повторите попытку или обратитесь в поддержку. "
-            "Если заказ уже появился, проверьте «Мои покупки»."
+        logger.exception("Verification checkout failed (product=%s)", product_id)
+        await callback.answer(
+            "Ошибка оформления. Проверьте «Мои покупки» перед повторной попыткой.",
+            show_alert=True
         )
         return
     if error:
-        await message.answer(f"❌ {error}\nСредства не списаны. Можете отменить оформление.")
+        await callback.answer(error, show_alert=True)
         return
 
-    await state.clear()
     order = await db.get_order(order_id)
-    await message.answer(
-        f"✅ Заказ #{order_id} создан! Списано: {order.buyer_price:.2f}$.\n\n"
-        "Пока продавец не принял заказ, его можно отменить с полным возвратом.\n"
-        "🔐 Коды входа, пароли и Telegram-сессии продавцу не передавайте.",
-        reply_markup=verification_order_keyboard(order_id),
+    if not order:
+        await callback.answer(
+            "Заказ сохранён. Откройте «Мои покупки» для проверки.", show_alert=True
+        )
+        return
+
+    text = (
+        f"✅ <b>Заказ #{order_id} создан!</b>\n\n"
+        f"👥 {escape(order.product_name)}\n"
+        f"💳 {'Бесплатно' if order.buyer_price == 0 else f'Списано: {order.buyer_price:.2f} USDT'}\n\n"
+        "⏳ Ожидайте, пока продавец примет заказ.\n"
+        "💬 После принятия откроется анонимный чат. Номер телефона и @username не нужны.\n"
+        "До принятия вы можете отменить заказ и получить полный возврат.\n\n"
+        "🔐 Никому не отправляйте пароли, коды входа или Telegram-сессии."
     )
+    try:
+        await callback.message.edit_text(
+            text, reply_markup=verification_order_keyboard(order_id)
+        )
+    except Exception:
+        logger.exception("Could not display created order #%s", order_id)
+        try:
+            await callback.message.answer(
+                text, reply_markup=verification_order_keyboard(order_id)
+            )
+        except Exception:
+            logger.exception("Could not send created order notice #%s", order_id)
+    await callback.answer("Заказ оформлен")
+
+    # If Telegram is offline, buyer can still see their order in My Purchases.
     sellers = await db.get_users_by_role(UserRole.SELLER)
     admins = await db.get_users_by_role(UserRole.ADMIN)
     owners = await db.get_users_by_role(UserRole.OWNER)
@@ -445,8 +443,8 @@ async def _finish_verification_order(message: Message, state: FSMContext, bot: B
     notify = (
         f"🆕 <b>Новый заказ #{order_id}</b>\n"
         f"Сервис: <b>{escape(order.product_name)}</b>\n"
-        f"Оплата продавцу: <b>{order.seller_price:.2f}$</b>\n"
-        "Авторизацию выполняет сам покупатель. Не просите коды или пароли."
+        f"Оплата продавцу: <b>{order.seller_price:.2f} USDT</b>\n"
+        "💬 Общайтесь с покупателем только через анонимный чат заказа."
     )
     for uid in recipients:
         try:
@@ -454,7 +452,7 @@ async def _finish_verification_order(message: Message, state: FSMContext, bot: B
                 uid, notify, reply_markup=new_order_keyboard(order_id)
             )
         except Exception:
-            pass
+            logger.warning("Could not notify seller/admin %s of order #%s", uid, order_id)
 
 
 @router.callback_query(F.data.startswith("cancel_verification:"))
@@ -766,34 +764,16 @@ async def check_payment(callback: CallbackQuery):
 
 
 @router.message(BuyStates.waiting_phone)
-async def buy_phone(message: Message, state: FSMContext, bot: Bot):
-    contact = (message.text or "").strip().replace(" ", "")
-    if not (re.fullmatch(r"\+[1-9]\d{7,14}", contact) or
-            re.fullmatch(r"@[A-Za-z0-9_]{5,32}", contact)):
-        await message.answer(
-            "Введите @username или номер в формате +79001234567."
-        )
-        return
-    await _finish_verification_order(message, state, bot, {"contact": contact})
-
-
 @router.message(BuyStates.waiting_email)
-async def buy_email(message: Message, state: FSMContext, bot: Bot):
-    email = (message.text or "").strip()
-    if not re.fullmatch(r"[^@\s]{1,64}@[^@\s]{1,190}\.[^@\s]{2,}", email):
-        await message.answer("Введите email в корректном формате без пароля.")
-        return
-    await _finish_verification_order(message, state, bot, {"email": email})
-
-
 @router.message(BuyStates.waiting_code)
 @router.message(BuyStates.waiting_email_pass)
-async def deprecated_login_step(message: Message, state: FSMContext):
+async def retired_contact_form(message: Message, state: FSMContext):
+    """Release anyone stuck in a pre-upgrade contact-entry state."""
     await state.clear()
     await message.answer(
-        "⚠️ Старый запрос кода/пароля отключён. Не отправляйте данные для входа.\n"
-        "Заново оформите заказ через каталог. Если предыдущая версия списала "
-        "средства, обратитесь в поддержку для проверки возврата."
+        "💬 Номер телефона, @username и почта для верификации больше не нужны!\n"
+        "Контакты не сохранены. Откройте каталог и нажмите «Купить» снова — "
+        "заказ оформится сразу, а для общения будет анонимный чат."
     )
 
 # ──────────────────── ПОДДЕРЖКА / КАНАЛ ────────────────────

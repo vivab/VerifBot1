@@ -182,3 +182,17 @@ Tests: `python -m unittest discover -s tests -v`.
 Set the usual hosting environment variables, and deploy from branch `main`.
 Keep the SQLite data directory mounted and persistent on BotHost. Test withdrawals
 using a funded testnet app and own Telegram accounts before enabling real payouts.
+
+## One-tap verification purchase (contactless)
+
+After choosing a verification, Buy immediately creates an order atomically.
+There are no phone, username, email or OTP collection steps.
+The assigned seller and buyer communicate exclusively through the anonymous order chat.
+The chat opens after the seller accepts the order. The buyer messages first.
+Free positions (price 0) debit nothing, and pay the seller 0 for that order.
+New owner-created verifications skip the obsolete login-method question.
+The same Buy button message cannot debit twice, including repeated callbacks.
+Buyers may cancel a pending order for a one-time full refund.
+On a pre-upgrade stale input prompt, use /start and buy again.
+
+Regression suite: python -m unittest discover -s tests -v.

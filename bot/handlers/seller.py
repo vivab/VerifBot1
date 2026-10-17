@@ -80,22 +80,15 @@ async def take_order(callback: CallbackQuery, bot: Bot):
         return
 
     order = await db.get_order(order_id)
-    entry = json.loads(order.entry_data) if order.entry_data else {}
-
-    if order.entry_type == EntryType.EMAIL:
-        contact = escape(str(entry.get("email") or "Не указан"))
-        creds = f"📧 Контактный email: <code>{contact}</code>"
-    else:
-        contact = escape(str(entry.get("contact") or entry.get("phone") or "Не указан"))
-        creds = f"📱 Telegram-контакт: <code>{contact}</code>"
-    creds += "\n🔐 Покупатель самостоятельно вводит коды и пароли."
-
     text = (
         f"✅ Вы взяли заказ <b>#{order_id}</b>\n\n"
-        f"Сервис: <b>{order.product_name}</b>\n"
-        f"Оплата: <b>{order.seller_price}$</b>\n\n"
-        f"<b>Контакт по заказу:</b>\n{creds}\n\n"
-        f"После выполнения нажмите «Завершить заказ»."
+        f"Сервис: <b>{escape(order.product_name)}</b>\n"
+        f"Оплата: <b>{order.seller_price:.2f} USDT</b>\n\n"
+        "💬 Контакты покупателя не нужны.\n"
+        "Покупатель может написать вам через анонимный чат, "
+        "после его первого сообщения вы сможете отвечать.\n"
+        "Если работу нужно отложить, сообщения всё равно будут приходить.\n\n"
+        "После выполнения нажмите «Завершить заказ»."
     )
 
     await callback.message.edit_text(text, reply_markup=active_order_keyboard(order_id, with_email_code=False), parse_mode="HTML")
@@ -127,21 +120,13 @@ async def view_order(callback: CallbackQuery):
         await callback.answer("Заказ не найден", show_alert=True)
         return
 
-    entry = json.loads(order.entry_data) if order.entry_data else {}
-    if order.entry_type == EntryType.EMAIL:
-        contact = escape(str(entry.get("email") or "Не указан"))
-        creds = f"📧 Контактный email: <code>{contact}</code>"
-    else:
-        contact = escape(str(entry.get("contact") or entry.get("phone") or "Не указан"))
-        creds = f"📱 Telegram-контакт: <code>{contact}</code>"
-    creds += "\n🔐 Покупатель самостоятельно вводит коды и пароли."
-
     text = (
         f"📦 Заказ <b>#{order.id}</b>\n\n"
-        f"Сервис: <b>{order.product_name}</b>\n"
-        f"Оплата: <b>{order.seller_price}$</b>\n\n"
-        f"<b>Контакт по заказу:</b>\n{creds}"
+        f"Сервис: <b>{escape(order.product_name)}</b>\n"
+        f"Оплата: <b>{order.seller_price:.2f} USDT</b>\n\n"
+        "💬 Вся переписка с покупателем — через анонимный чат."
     )
+
     await callback.message.edit_text(text, reply_markup=active_order_keyboard(order.id, with_email_code=False), parse_mode="HTML")
     await callback.answer()
 

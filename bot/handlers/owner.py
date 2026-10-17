@@ -198,7 +198,11 @@ async def add_product_start(callback: CallbackQuery, state: FSMContext):
 
 @router.message(OwnerAddProduct.name)
 async def add_product_name(message: Message, state: FSMContext):
-    await state.update_data(name=message.text.strip())
+    name = (message.text or "").strip()
+    if not 2 <= len(name) <= 120:
+        await message.answer("Введите название от 2 до 120 символов.")
+        return
+    await state.update_data(name=name)
     await state.set_state(OwnerAddProduct.buyer_price)
     await message.answer("Введите цену для <b>покупателя</b> ($):", parse_mode="HTML")
 
@@ -206,26 +210,60 @@ async def add_product_name(message: Message, state: FSMContext):
 @router.message(OwnerAddProduct.buyer_price)
 async def add_product_buyer_price(message: Message, state: FSMContext):
     try:
-        price = float(message.text.replace(",", ".").strip())
+        price = float((message.text or "").replace(",", ".").strip())
+        if not isfinite(price) or price < 0 or price > 100000:
+            raise ValueError
     except ValueError:
-        await message.answer("Введите число, например: 15")
+        await message.answer("Цена должна быть от 0 до 100000 USDT. Для бесплатного товара введите 0.")
         return
     await state.update_data(buyer_price=price)
     await state.set_state(OwnerAddProduct.seller_price)
-    await message.answer("Введите цену для <b>продавца</b> ($):", parse_mode="HTML")
+    await message.answer(
+        "Введите вознаграждение продавца в USDT.\n"
+        "Для бесплатной позиции укажите 0."
+    )
 
 
 @router.message(OwnerAddProduct.seller_price)
 async def add_product_seller_price(message: Message, state: FSMContext):
     try:
-        price = float(message.text.replace(",", ".").strip())
+        seller_price = float((message.text or "").replace(",", ".").strip())
+        if not isfinite(seller_price) or seller_price < 0 or seller_price > 100000:
+            raise ValueError
     except ValueError:
-        await message.answer("Введите число, например: 8")
+        await message.answer("Вознаграждение должно быть от 0 до 100000 USDT.")
         return
-    await state.update_data(seller_price=price)
-    await state.set_state(OwnerAddProduct.entry_type)
-    await message.answer("Выберите способ входа:", reply_markup=entry_type_keyboard())
+    data = await state.get_data()
+    buyer_price = data.get("buyer_price")
+    if buyer_price is None:
+        await state.clear()
+        await message.answer("Начните добавление товара заново через панель владельца.")
+        return
+    if buyer_price == 0 and seller_price != 0:
+        await message.answer(
+            "Для бесплатной позиции вознаграждение продавца должно быть 0. "
+            "Введите 0 либо укажите покупателю платную цену при создании товара заново."
+        )
+        return
 
+    # No "email vs Telegram login" step: verification uses order chat exclusively.
+    product_id = await db.add_product(
+        name=data["name"],
+        buyer_price=buyer_price,
+        seller_price=seller_price,
+        entry_type=EntryType.NONE,
+    )
+    await state.update_data(sticker_kind="verification", sticker_id=product_id)
+    await state.set_state(OwnerSticker.waiting)
+    await message.answer(
+        f"✅ Верификация #{product_id} добавлена.\n"
+        f"Название: {escape(data['name'])}\n"
+        f"Цена покупателя: {buyer_price:.2f} USDT\n"
+        f"Вознаграждение продавца: {seller_price:.2f} USDT\n\n"
+        "💬 После покупки будет анонимный чат, контактные данные не нужны.\n"
+        "🎨 Пришлите стикер товара либо /skip.",
+        reply_markup=cancel_to_panel(),
+    )
 
 @router.callback_query(F.data.startswith("entry:"), OwnerAddProduct.entry_type)
 async def add_product_entry(callback: CallbackQuery, state: FSMContext):

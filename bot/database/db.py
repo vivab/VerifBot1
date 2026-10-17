@@ -199,6 +199,15 @@ class Database:
         except aiosqlite.OperationalError as error:
             if "duplicate column" not in str(error).lower():
                 raise
+        # Record who cancelled an order without touching completed orders.
+        try:
+            await self.conn.execute(
+                "ALTER TABLE orders ADD COLUMN cancel_reason TEXT"
+            )
+            await self.conn.commit()
+        except aiosqlite.OperationalError as error:
+            if "duplicate column" not in str(error).lower():
+                raise
         # Миграции для старых БД
         try:
             await self.conn.execute("ALTER TABLE orders ADD COLUMN category TEXT DEFAULT 'verification'")
@@ -962,52 +971,99 @@ class Database:
                 await conn.rollback()
                 raise
 
-    async def refund_pending_verification_order(self, buyer_id: int, order_id: int):
-        """Refund once, only before a seller accepts the verification."""
+    async def cancel_pending_verification_order(
+        self, order_id: int, *, buyer_id: int | None = None,
+        reason: str = "buyer", now: datetime | None = None
+    ):
+        """Atomically cancel/refund an unaccepted verification.
+
+        Buyer can cancel only at >= 1 h; overdue orders use timeout reason.
+        Automatic cancellation requires >= 24 h. Repeated calls cannot refund
+        twice; seller acceptance and refunds cannot both win the same race.
+        """
+        if reason not in ("buyer", "timeout"):
+            raise ValueError("Invalid cancellation reason")
+        current = now or datetime.utcnow()
         async with aiosqlite.connect(self.db_path) as conn:
             await conn.execute("PRAGMA busy_timeout=5000")
             await conn.execute("BEGIN IMMEDIATE")
             try:
                 async with conn.execute(
-                    """SELECT buyer_price FROM orders
-                       WHERE id = ? AND buyer_id = ?
-                         AND status = 'pending' AND seller_id IS NULL
+                    """SELECT buyer_id, buyer_price, created_at FROM orders
+                       WHERE id = ? AND status = 'pending' AND seller_id IS NULL
                          AND (category = 'verification' OR category IS NULL)""",
-                    (order_id, buyer_id),
+                    (order_id,)
                 ) as cur:
                     row = await cur.fetchone()
-                if not row:
+                if not row or (buyer_id is not None and row[0] != buyer_id):
                     await conn.rollback()
                     return None
-                amount = float(row[0])
+                age = current - datetime.fromisoformat(row[2])
+                if age < timedelta(hours=1):
+                    await conn.rollback()
+                    return None
+                if reason == "timeout" and age < timedelta(hours=24):
+                    await conn.rollback()
+                    return None
+                # A >=24h unaccepted order is always expired, even when
+                # the buyer presses a stale Cancel button before the worker.
+                final_reason = "timeout" if age >= timedelta(hours=24) else reason
+                amount = float(row[1])
                 updated = await conn.execute(
-                    """UPDATE orders SET status = 'cancelled', entry_data = NULL
-                       WHERE id = ? AND buyer_id = ?
-                         AND status = 'pending' AND seller_id IS NULL
-                         AND (category = 'verification' OR category IS NULL)""",
-                    (order_id, buyer_id),
+                    """UPDATE orders SET status='cancelled', entry_data=NULL,
+                       cancel_reason=? WHERE id=? AND status='pending'
+                       AND seller_id IS NULL
+                       AND (category='verification' OR category IS NULL)""",
+                    (final_reason, order_id)
                 )
                 if updated.rowcount != 1:
                     await conn.rollback()
                     return None
-                await conn.execute(
-                    """UPDATE users SET balance = balance + ?,
-                       turnover = MAX(0, turnover - ?),
-                       verifications_bought = MAX(0, verifications_bought - 1)
-                       WHERE user_id = ?""",
-                    (amount, amount, buyer_id),
+                credited = await conn.execute(
+                    """UPDATE users SET balance=balance+?,
+                       turnover=MAX(0, turnover-?),
+                       verifications_bought=MAX(0, verifications_bought-1)
+                       WHERE user_id=?""",
+                    (amount, amount, row[0])
                 )
+                if credited.rowcount != 1:
+                    raise RuntimeError("Buyer missing when refunding an order")
                 await conn.execute(
                     """INSERT INTO verification_refunds
-                       (order_id, buyer_id, amount, created_at)
-                       VALUES (?, ?, ?, ?)""",
-                    (order_id, buyer_id, amount, datetime.utcnow().isoformat()),
+                       (order_id,buyer_id,amount,created_at) VALUES(?,?,?,?)""",
+                    (order_id, row[0], amount, current.isoformat())
                 )
                 await conn.commit()
-                return amount
+                return {
+                    "order_id": order_id,
+                    "buyer_id": row[0],
+                    "amount": amount,
+                    "reason": final_reason,
+                }
             except Exception:
                 await conn.rollback()
                 raise
+
+    async def refund_pending_verification_order(self, buyer_id: int, order_id: int):
+        """Compatibility wrapper; buyer hold still enforced in the DB."""
+        result = await self.cancel_pending_verification_order(
+            order_id, buyer_id=buyer_id, reason="buyer"
+        )
+        return result["amount"] if result else None
+
+    async def get_expired_pending_verification_ids(
+        self, *, now: datetime | None = None, limit: int = 100
+    ):
+        cutoff = ((now or datetime.utcnow()) - timedelta(hours=24)).isoformat()
+        async with self.conn.execute(
+            """SELECT id FROM orders
+               WHERE status='pending' AND seller_id IS NULL
+               AND (category='verification' OR category IS NULL)
+               AND created_at <= ? ORDER BY created_at, id LIMIT ?""",
+            (cutoff, limit)
+        ) as cur:
+            return [r["id"] for r in await cur.fetchall()]
+
 
     async def complete_verification_and_pay_seller(self, order_id: int, seller_id: int):
         """Order completion and seller payout in one transaction, once."""
@@ -1090,16 +1146,23 @@ class Database:
             taken_at=datetime.fromisoformat(row["taken_at"]) if g("taken_at") else None,
             completed_at=datetime.fromisoformat(row["completed_at"]) if g("completed_at") else None,
             auto_complete_at=datetime.fromisoformat(row["auto_complete_at"]) if g("auto_complete_at") else None,
+            cancel_reason=g("cancel_reason"),
         )
 
     async def take_order(self, order_id: int, seller_id: int) -> bool:
         """Атомарно берёт заказ. Возвращает True если удалось."""
         now = datetime.utcnow().isoformat()
+        # Expired verification orders cannot be taken even if the timeout
+        # worker has not yet visited them.
+        cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat()
         cursor = await self.conn.execute(
-            """UPDATE orders 
+            """UPDATE orders
                SET seller_id = ?, status = ?, taken_at = ?
-               WHERE id = ? AND status = ? AND seller_id IS NULL""",
-            (seller_id, OrderStatus.IN_PROGRESS.value, now, order_id, OrderStatus.PENDING.value)
+               WHERE id = ? AND status = ? AND seller_id IS NULL
+                 AND ((category IS NOT NULL AND category <> 'verification')
+                      OR created_at > ?)""",
+            (seller_id, OrderStatus.IN_PROGRESS.value, now, order_id,
+             OrderStatus.PENDING.value, cutoff)
         )
         await self.conn.commit()
         return cursor.rowcount > 0

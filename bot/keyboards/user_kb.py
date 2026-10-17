@@ -84,7 +84,7 @@ def invoice_keyboard(invoice_id: int) -> InlineKeyboardMarkup:
 
 def verification_order_keyboard(order_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="❌ Отменить заказ — вернуть средства",
+    builder.button(text="❌ Отменить заказ (после 1 часа)",
                    callback_data=f"cancel_verification:{order_id}")
     builder.button(text="💬 Чат по заказу", callback_data=f"chat:open:{order_id}")
     builder.button(text="📦 Мои покупки", callback_data="my_purchases")

@@ -196,3 +196,22 @@ Buyers may cancel a pending order for a one-time full refund.
 On a pre-upgrade stale input prompt, use /start and buy again.
 
 Regression suite: python -m unittest discover -s tests -v.
+
+## Verification acceptance timeout and buyer cancellation hold
+
+- After checkout, a buyer may request cancellation only after **one hour**
+  while the order is still pending and no seller has accepted it.
+- The **Cancel order** button is displayed immediately; pressing it earlier
+  shows a one-hour hold warning with remaining minutes, without a refund.
+- A verification order that nobody accepts in **24 hours** is automatically
+  cancelled by a background task and the buyer's wallet credited in full.
+  The task checks on startup and then every 60 seconds while the bot is running.
+- A stale seller **Accept** button cannot accept an expired or cancelled order.
+  After buyer cancellation it reports that the user cancelled the order.
+- Buyers and sellers receive cancellation notices (Telegram delivery may fail
+  if the recipient has blocked the bot). The order is cancelled in SQLite
+  whether or not a notification can be delivered.
+- Only *verification* orders are affected; accepted orders, Telegram account
+  stock orders and manual purchases keep their existing business logic.
+- Refund and state transition happen in a single locked transaction.
+  Double clicks or races between accepting and cancelling never refund twice.

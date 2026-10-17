@@ -4,6 +4,8 @@ import secrets
 from html import escape
 from aiogram import Router, F, Bot
 import logging
+from datetime import datetime, timedelta
+from math import ceil
 from decimal import Decimal, InvalidOperation
 from aiogram.types import InlineKeyboardMarkup
 from bot.keyboards.pagination import PAGE_SIZE, page_slice
@@ -25,6 +27,7 @@ from bot.config import settings as app_settings
 from bot.keyboards.seller_kb import new_order_keyboard
 from bot.states.states import TopUpStates, BuyStates, WithdrawStates
 from bot.services.cryptopay import cryptopay
+from bot.services.order_timeouts import notify_sellers_order_closed, notify_expired_order, expire_order_if_needed
 from bot.config import settings
 from bot.i18n import tr, menu_variants
 
@@ -418,7 +421,7 @@ async def confirm_buy(callback: CallbackQuery, state: FSMContext, bot: Bot):
         f"💳 {'Бесплатно' if order.buyer_price == 0 else f'Списано: {order.buyer_price:.2f} USDT'}\n\n"
         "⏳ Ожидайте, пока продавец примет заказ.\n"
         "💬 После принятия откроется анонимный чат. Номер телефона и @username не нужны.\n"
-        "До принятия вы можете отменить заказ и получить полный возврат.\n\n"
+        "❌ Отменить заказ можно после 1 часа ожидания, если продавец его ещё не принял.\n⏰ Через 24 часа без принятия заказ отменится автоматически, а деньги вернутся.\n\n"
         "🔐 Никому не отправляйте пароли, коды входа или Telegram-сессии."
     )
     try:
@@ -456,28 +459,87 @@ async def confirm_buy(callback: CallbackQuery, state: FSMContext, bot: Bot):
 
 
 @router.callback_query(F.data.startswith("cancel_verification:"))
-async def cancel_verification_order(callback: CallbackQuery):
+async def cancel_verification_order(callback: CallbackQuery, bot: Bot):
     try:
         order_id = int(callback.data.split(":")[1])
     except (IndexError, ValueError):
         await callback.answer("Некорректный номер заказа.", show_alert=True)
         return
-    refunded = await db.refund_pending_verification_order(callback.from_user.id, order_id)
-    if refunded is None:
+
+    order = await db.get_order(order_id)
+    if not order or order.buyer_id != callback.from_user.id or order.category != "verification":
+        await callback.answer("Заказ не найден или принадлежит другому пользователю.",
+                              show_alert=True)
+        return
+
+    if order.status != OrderStatus.PENDING:
+        if order.status == OrderStatus.CANCELLED:
+            reason = (
+                "Заказ уже автоматически отменён после 24 часов ожидания."
+                if order.cancel_reason == "timeout" else
+                "Заказ уже отменён пользователем."
+            )
+        else:
+            reason = "Заказ уже принят продавцом или завершён. Отмена недоступна."
+        await callback.answer(reason, show_alert=True)
+        return
+
+    # Overdue orders should be closed as timeouts even if the 60-second worker
+    # has not yet run, so an old order cannot remain available.
+    age = datetime.utcnow() - order.created_at
+    if age >= timedelta(hours=24):
+        await expire_order_if_needed(order_id, bot)
+        updated = await db.get_order(order_id)
+        if updated and updated.status == OrderStatus.CANCELLED:
+            await callback.message.edit_text(
+                f"⏰ Заказ #{order_id} отменён автоматически.\n"
+                f"💰 {order.buyer_price:.2f} USDT возвращено на баланс."
+            )
+        await callback.answer("24 часа истекли. Заказ автоматически отменён.",
+                              show_alert=True)
+        return
+
+    if age < timedelta(hours=1):
+        minutes = max(1, ceil((timedelta(hours=1) - age).total_seconds() / 60))
         await callback.answer(
-            "Автовозврат недоступен: заказ уже взят в работу, завершён, "
-            "отменён или принадлежит другому пользователю. Обратитесь в поддержку.",
+            "❌ Отменить заказ можно только после одного часа ожидания.\n"
+            f"Осталось примерно {minutes} мин.",
             show_alert=True,
         )
         return
-    user = await db.get_user(callback.from_user.id)
-    await callback.message.edit_text(
-        f"✅ Заказ #{order_id} отменён.\n"
-        f"💰 Возвращено: {refunded:.2f}$.\n"
-        f"Ваш баланс: {user.balance:.2f}$."
-    )
-    await callback.answer("Средства возвращены")
 
+    result = await db.cancel_pending_verification_order(
+        order_id, buyer_id=callback.from_user.id, reason="buyer"
+    )
+    if not result:
+        current = await db.get_order(order_id)
+        reason = (
+            "Заказ уже отменён." if current and current.status == OrderStatus.CANCELLED
+            else "Продавец уже принял заказ, либо заказ больше не доступен для отмены."
+        )
+        await callback.answer(reason, show_alert=True)
+        return
+
+    if result["reason"] == "timeout":
+        await notify_expired_order(bot, result)
+        description = "⏰ Заказ автоматически отменён через 24 часа."
+    else:
+        await notify_sellers_order_closed(bot, order_id, "buyer")
+        description = "✅ Вы отменили заказ. Продавцы больше не смогут его принять."
+    wallet = await db.get_user(callback.from_user.id)
+    try:
+        await callback.message.edit_text(
+            f"{description}\n"
+            f"📦 Заказ #{order_id}\n"
+            f"💰 Возвращено на баланс: {result['amount']:.2f} USDT\n"
+            f"💳 Баланс: {wallet.balance:.2f} USDT"
+        )
+    except Exception:
+        logger.warning("Could not update cancellation message for order #%s", order_id)
+        await callback.message.answer(
+            f"{description}\n💰 Возвращено {result['amount']:.2f} USDT"
+        )
+    await callback.answer("Заказ отменён, деньги возвращены")
 
 @router.callback_query(F.data == "my_purchases")
 async def my_purchases(callback: CallbackQuery):
@@ -496,6 +558,9 @@ async def my_purchases(callback: CallbackQuery):
     text = "📦 <b>Мои верификации</b>\n\n"
     for o in verifications[:12]:
         status = labels.get(o.status, o.status.value)
+        if o.status == OrderStatus.CANCELLED:
+            status = ("⏰ Автоотмена через 24 часа" if o.cancel_reason == "timeout"
+                      else "❌ Отменён покупателем")
         text += f"#{o.id} — {escape(o.product_name)}: {status}\n"
     await callback.message.answer(
         text,

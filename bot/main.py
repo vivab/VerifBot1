@@ -10,6 +10,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from bot.config import settings
 from bot.database.db import db
 from bot.services.cryptopay import cryptopay
+from bot.services.order_timeouts import pending_verification_timeout_worker
 from bot.handlers import common, user, seller, owner, chat
 
 logging.basicConfig(
@@ -121,6 +122,7 @@ async def on_startup(bot: Bot):
     _background_tasks.append(asyncio.create_task(auto_complete_tg_orders(bot)))
     _background_tasks.append(asyncio.create_task(chat.chat_delivery_worker(bot)))
     _background_tasks.append(asyncio.create_task(reconcile_wallet(bot)))
+    _background_tasks.append(asyncio.create_task(pending_verification_timeout_worker(bot)))
 
 
 async def on_shutdown(bot: Bot):

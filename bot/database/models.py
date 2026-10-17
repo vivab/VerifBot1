@@ -116,3 +116,4 @@ class Order:
     taken_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     auto_complete_at: Optional[datetime] = None
+    cancel_reason: Optional[str] = None

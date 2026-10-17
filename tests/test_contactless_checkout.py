@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -74,6 +75,11 @@ class ContactlessCheckoutTests(unittest.IsolatedAsyncioTestCase):
         await self._checkout(pid)
         self.assertEqual(len(await self.db.get_user_orders(self.buyer)), 1)
         self.assertEqual((await self.db.get_user(self.buyer)).balance, 25)
+        await self.db.conn.execute(
+            "UPDATE orders SET created_at=? WHERE id=?",
+            ((datetime.utcnow() - timedelta(hours=1, minutes=1)).isoformat(), orders[0].id)
+        )
+        await self.db.conn.commit()
         self.assertEqual(
             await self.db.refund_pending_verification_order(self.buyer, orders[0].id), 0
         )

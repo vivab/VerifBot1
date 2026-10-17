@@ -9,6 +9,7 @@ from bot.keyboards.chat_kb import chat_open_keyboard
 from bot.database.models import UserRole, OrderStatus, EntryType
 from bot.keyboards.seller_kb import active_order_keyboard, my_orders_keyboard
 from bot.keyboards.user_kb import main_menu, back_keyboard
+from bot.services.order_timeouts import expire_order_if_needed
 
 router = Router()
 
@@ -73,10 +74,26 @@ async def take_order(callback: CallbackQuery, bot: Bot):
 
     success = await db.take_order(order_id, user.user_id)
     if not success:
-        await callback.answer("Заказ уже взят другим поставщиком ❌", show_alert=True)
-        await callback.message.edit_text(
-            callback.message.text + "\n\n❌ Заказ уже взят другим поставщиком."
-        )
+        # An unaccepted 24h-old order must be refunded even if the
+        # background timer has not processed it yet.
+        await expire_order_if_needed(order_id, bot)
+        current = await db.get_order(order_id)
+        if current and current.status == OrderStatus.CANCELLED:
+            if current.cancel_reason == "buyer":
+                text = "❌ Заказ отменён пользователем."
+            else:
+                text = "⏰ Заказ автоматически отменён после 24 часов ожидания."
+        elif current and current.status == OrderStatus.IN_PROGRESS:
+            text = "❌ Заказ уже принят другим продавцом."
+        else:
+            text = "❌ Заказ недоступен."
+        await callback.answer(text, show_alert=True)
+        try:
+            await callback.message.edit_text(
+                f"📦 Заказ #{order_id}\n{text}\nПринять его больше нельзя."
+            )
+        except Exception:
+            pass
         return
 
     order = await db.get_order(order_id)

@@ -49,6 +49,16 @@ class VerificationAccountingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(buyer.balance, 20)
         self.assertEqual(buyer.turnover, 5)
         self.assertEqual(buyer.verifications_bought, 1)
+        # Advance a newly placed order past the mandatory one-hour hold.
+        # A refund before that timestamp is intentionally forbidden.
+        self.assertIsNone(
+            await self.db.refund_pending_verification_order(self.buyer_id, order_id)
+        )
+        await self.db.conn.execute(
+            "UPDATE orders SET created_at=? WHERE id=?",
+            ((datetime.utcnow() - timedelta(hours=1, minutes=1)).isoformat(), order_id)
+        )
+        await self.db.conn.commit()
         self.assertEqual(
             await self.db.refund_pending_verification_order(self.buyer_id, order_id), 5
         )
